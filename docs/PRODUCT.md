@@ -28,4 +28,4 @@ Anyone who screenshots all day: students, devs filing bugs, traders sharing char
 Cloud upload, accounts, screen recording video (maybe later).
 
 ## UX principles
-Zero-config: works right after install with sensible defaults (folder: ~/Pictures/ShotDrop, template `{app}-{date}-{time}`). Never lose a screenshot: if moving fails, leave the original and notify.
+Use sensible defaults on supported local setups (folder: ~/Pictures/ShotDrop, template `{app}-{date}-{time}`). If the default folder cannot be safely prepared or verified, saving pauses and the original screenshot stays in place. A local-folder policy does not prove that an unrelated sync app is absent.

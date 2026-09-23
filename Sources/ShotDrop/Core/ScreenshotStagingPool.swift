@@ -19,6 +19,7 @@ struct ScreenshotStagingPool: Sendable {
     private let fault: @Sendable (ScreenshotStagingPoolFault) throws -> Void
     private let volumeInspector: any ScreenshotStagingVolumeInspecting
     private let liveDeviceReader: @Sendable (Int32) throws -> UInt64
+    private let defaultPolicyInspector: DefaultDestinationPolicyPathInspector
 
     static var applicationDefault: Self {
         Self(registryDirectory: FileManager.default.homeDirectoryForCurrentUser
@@ -29,11 +30,13 @@ struct ScreenshotStagingPool: Sendable {
         registryDirectory: URL,
         volumeInspector: any ScreenshotStagingVolumeInspecting = DarwinScreenshotStagingVolumeInspector(),
         liveDeviceReader: @escaping @Sendable (Int32) throws -> UInt64 = poolDevice,
+        defaultPolicyInspector: DefaultDestinationPolicyPathInspector = .init(),
         fault: @escaping @Sendable (ScreenshotStagingPoolFault) throws -> Void = { _ in }
     ) {
         self.registryDirectory = registryDirectory
         self.volumeInspector = volumeInspector
         self.liveDeviceReader = liveDeviceReader
+        self.defaultPolicyInspector = defaultPolicyInspector
         self.fault = fault
     }
 
@@ -84,12 +87,27 @@ struct ScreenshotStagingPool: Sendable {
         guard ordinaryLocalDestinationReviewed else {
             throw poolFailure("Staging enrollment requires an explicit review of this ordinary local destination.")
         }
-        do { try registerNewRoot(at: root, sourceDirectory: sourceDirectory, destinationDirectory: destinationDirectory) }
+        do { try registerNewRoot(at: root, sourceDirectory: sourceDirectory,
+                                 destinationDirectory: destinationDirectory, policyBinding: nil) }
         catch let error as ScreenshotCopyFailure where error.code == .stagingPaused { throw error }
         catch { throw poolFailure("Staging registration is paused: \(error.localizedDescription)") }
     }
 
-    private func registerNewRoot(at root: URL, sourceDirectory: URL, destinationDirectory: URL) throws {
+    /// Policy-bound default enrollment has no Boolean review escape hatch. Core independently
+    /// validates the issuer's object binding before its durable root reservation.
+    func registerPolicyRoot(at root: URL, sourceDirectory: URL, destinationDirectory: URL,
+                            attestation: DefaultDestinationAttestation) throws {
+        do {
+            try registerNewRoot(at: root, sourceDirectory: sourceDirectory,
+                destinationDirectory: destinationDirectory, policyBinding: attestation.binding,
+                liveDevice: attestation.liveDevice)
+        } catch let error as ScreenshotCopyFailure where error.code == .stagingPaused { throw error }
+        catch { throw poolFailure("Default destination enrollment is paused: \(error.localizedDescription)") }
+    }
+
+    private func registerNewRoot(at root: URL, sourceDirectory: URL, destinationDirectory: URL,
+                                 policyBinding: DefaultDestinationPolicyBinding?,
+                                 liveDevice: UInt64? = nil) throws {
         try poolValidateURL(root)
         let session = try PoolSession.open(at: registryDirectory, volumeInspector: volumeInspector, liveDeviceReader: liveDeviceReader, fault: fault)
         defer { session.close() }
@@ -103,6 +121,15 @@ struct ScreenshotStagingPool: Sendable {
         defer { close(destinationFD) }
         let rootVolume = try volumeInspector.inspect(destinationFD)
         try rootVolume.requireSupported()
+        if let policyBinding {
+            guard liveDevice == rootVolume.device,
+                  try liveDeviceReader(destinationFD) == rootVolume.device,
+                  destinationDirectory.path == policyBinding.path else {
+                throw poolFailure("The default destination's live identity changed before enrollment.")
+            }
+            try policyBinding.requireCurrent(descriptor: destinationFD,
+                                             inspector: defaultPolicyInspector)
+        }
         let destinationReview = try PoolDestinationReview.capture(destinationFD, volume: rootVolume, liveDeviceReader: liveDeviceReader)
         guard !session.registry.roots.contains(where: { $0.volumeUUID == rootVolume.volumeUUID }) else {
             throw poolFailure("This volume already has a charged staging root; another cannot be registered.")
@@ -125,6 +152,7 @@ struct ScreenshotStagingPool: Sendable {
         let index = session.registry.roots.count
         session.registry.roots.append(PoolRoot(path: root.path, volumeUUID: rootVolume.volumeUUID, identity: nil, ready: false,
             destinationReview: destinationReview,
+            policyBinding: policyBinding,
             slots: (0..<ScreenshotStagingLimits.slotsPerRoot).map { PoolSlot(name: "slot-\($0).stage", identity: nil, baseline: nil, state: .retired) }))
         try session.persist()
         do {
@@ -189,6 +217,9 @@ struct ScreenshotStagingPool: Sendable {
                 throw poolFailure("Only an existing registered root can receive a replacement destination review.")
             }
             let root = session.registry.roots[index]
+            guard root.policyBinding == nil else {
+                throw poolFailure("A policy-bound default destination cannot be replaced through manual review.")
+            }
             let descriptor = try poolOpenDirectory(rootURL)
             defer { close(descriptor) }
             guard try PoolIdentity.read(descriptor, volume: volume, liveDeviceReader: liveDeviceReader, directory: true) == root.identity else {
@@ -240,6 +271,10 @@ struct ScreenshotStagingPool: Sendable {
         guard let rootIndex = session.registry.roots.firstIndex(where: { $0.volumeUUID == rootVolume.volumeUUID }),
               session.registry.roots[rootIndex].ready else {
             throw poolFailure("No usable staging root is registered on this destination volume.")
+        }
+        if let policyBinding = session.registry.roots[rootIndex].policyBinding {
+            try policyBinding.requireCurrent(descriptor: destinationAnchorFD,
+                                             inspector: defaultPolicyInspector)
         }
         let destinationReview = try PoolDestinationReview.capture(destinationAnchorFD, volume: rootVolume, liveDeviceReader: liveDeviceReader)
         guard destinationReview == session.registry.roots[rootIndex].destinationReview else {
@@ -464,6 +499,7 @@ private struct PoolRoot: Codable {
     var identity: PoolIdentity?
     var ready: Bool
     var destinationReview: PoolDestinationReview
+    var policyBinding: DefaultDestinationPolicyBinding?
     var slots: [PoolSlot]
 }
 
