@@ -5,11 +5,14 @@ import Observation
 @MainActor
 @Observable
 final class RecentMenuController {
-    private let history = RecentHistoryStore()
-    private let previews = RecentPreviewCache()
+    typealias RowValidator = @Sendable (UUID, RecentFileReference) async throws -> RecentRowValidation
+    private let history: RecentHistoryStore
+    private let previews: RecentPreviewCache
+    private let validateRow: RowValidator
     private let settings: AppSettings
     private var records: [UUID: RecentHistoryRecord] = [:]
     private var rowTasks: [UUID: Task<Void, Never>] = [:]
+    private var rowValidationTokens: [UUID: UUID] = [:]
     private var visibleRows: Set<UUID> = []
     private var generation: UInt64 = 0
     private var clipboardGeneration: UInt64 = 0
@@ -19,7 +22,15 @@ final class RecentMenuController {
     private(set) var status = "Setup needed · Not watching"
     private(set) var historyUnavailable = false
 
-    init(settings: AppSettings) { self.settings = settings }
+    init(settings: AppSettings, history: RecentHistoryStore = RecentHistoryStore(),
+         previews: RecentPreviewCache = RecentPreviewCache(), rowValidator: RowValidator? = nil) {
+        self.settings = settings
+        self.history = history
+        self.previews = previews
+        self.validateRow = rowValidator ?? { id, reference in
+            try await previews.validateRow(captureID: id, reference: reference)
+        }
+    }
 
     func panelVisible(_ visible: Bool) {
         if visible {
@@ -30,12 +41,8 @@ final class RecentMenuController {
             visibleRows.removeAll()
             for task in rowTasks.values { task.cancel() }
             rowTasks.removeAll()
-            rows = rows.map { row in
-                RecentMenuRow(id: row.id, displayName: row.displayName,
-                    detectedAt: row.detectedAt, detail: row.detail,
-                    availability: row.availability, savedPath: row.savedPath,
-                    sourcePath: row.sourcePath, previewImage: nil, copyConfirmation: nil)
-            }
+            rowValidationTokens.removeAll()
+            rows = rows.compactMap { records[$0.id].map(Self.makeRow) }
             Task { await previews.panelDidClose() }
         }
     }
@@ -46,7 +53,9 @@ final class RecentMenuController {
             checkRow(id)
         } else {
             visibleRows.remove(id)
+            rowValidationTokens.removeValue(forKey: id)
             rowTasks.removeValue(forKey: id)?.cancel()
+            if let record = records[id] { updateRow(id) { _ in Self.makeRow(record) } }
         }
     }
 
@@ -63,6 +72,9 @@ final class RecentMenuController {
         } catch {
             guard generation == requestGeneration else { return }
             historyUnavailable = true
+            for task in rowTasks.values { task.cancel() }
+            rowTasks.removeAll()
+            rowValidationTokens.removeAll()
             records.removeAll()
             textCopy.retain([])
             rows = []
@@ -77,6 +89,7 @@ final class RecentMenuController {
                 generation &+= 1
                 for task in rowTasks.values { task.cancel() }
                 rowTasks.removeAll()
+                rowValidationTokens.removeAll()
                 records.removeAll()
                 rows = []
                 historyUnavailable = false
@@ -89,7 +102,7 @@ final class RecentMenuController {
     }
 
     func perform(_ id: UUID, _ action: RecentMenuAction) {
-        guard let record = records[id] else { return }
+        guard let record = records[id], rows.first(where: { $0.id == id })?.allows(action) == true else { return }
         if action == .cancelCopyText {
             if textCopy.activeID == id { textCopy.cancel() }
             return
@@ -220,15 +233,39 @@ final class RecentMenuController {
     }
 
     private func checkRow(_ id: UUID) {
+        rowValidationTokens.removeValue(forKey: id)
         rowTasks.removeValue(forKey: id)?.cancel()
-        guard let record = records[id],
+        guard visibleRows.contains(id), let record = records[id],
               let reference = record.savedReference ?? record.sourceReference else { return }
+        let token = UUID()
+        rowValidationTokens[id] = token
+        updateRow(id) { _ in Self.makeRow(record) }
         let requestGeneration = generation
         rowTasks[id] = Task {
+            defer {
+                if rowValidationTokens[id] == token {
+                    rowValidationTokens.removeValue(forKey: id)
+                    rowTasks.removeValue(forKey: id)
+                }
+            }
             let result: RecentRowValidation
-            do { result = try await previews.validateRow(captureID: id, reference: reference) }
-            catch { return } // Cancellation/queue pressure does not authorize a file action.
+            do { result = try await validateRow(id, reference) }
+            catch {
+                guard rowValidationTokens[id] == token, generation == requestGeneration,
+                      visibleRows.contains(id), records[id]?.revision == record.revision else { return }
+                let detail: String
+                if error is CancellationError { detail = "File check cancelled · Retry File Check" }
+                else if error as? RecentPreviewError == .queueFull { detail = "File check busy · Retry File Check" }
+                else { detail = "File check unavailable · Retry File Check" }
+                updateRow(id) { row in
+                    RecentMenuRow(id: row.id, displayName: row.displayName, detectedAt: row.detectedAt,
+                        detail: detail, availability: .unavailable, savedPath: row.savedPath,
+                        sourcePath: row.sourcePath, previewImage: nil, copyConfirmation: nil)
+                }
+                return
+            }
             guard !Task.isCancelled, generation == requestGeneration,
+                  rowValidationTokens[id] == token,
                   visibleRows.contains(id), records[id]?.revision == record.revision else { return }
             switch result {
             case .unavailable(let issue): markUnavailable(id, issue: issue)
@@ -236,8 +273,8 @@ final class RecentMenuController {
                 textCopy.clearUnavailable(id)
                 updateRow(id) { row in
                     RecentMenuRow(id: row.id, displayName: row.displayName,
-                        detectedAt: row.detectedAt, detail: row.detail,
-                        availability: row.availability, savedPath: row.savedPath,
+                        detectedAt: row.detectedAt, detail: reference.role == .savedCopy ? "Saved copy" : "Original only",
+                        availability: reference.role == .savedCopy ? .saved : .sourceOnly, savedPath: row.savedPath,
                         sourcePath: row.sourcePath, previewImage: image,
                         copyConfirmation: row.copyConfirmation)
                 }
@@ -248,6 +285,7 @@ final class RecentMenuController {
                     if let updated = try? await history.update(captureID: id,
                         expectedRevision: record.revision, change: change),
                         !Task.isCancelled, generation == requestGeneration,
+                        rowValidationTokens[id] == token,
                         visibleRows.contains(id), records[id]?.revision == record.revision {
                         records[id] = updated
                     }
@@ -255,6 +293,9 @@ final class RecentMenuController {
             }
         }
     }
+
+    /// Captures the current completion for lifecycle tests without starting work.
+    func currentRowValidation(_ id: UUID) -> Task<Void, Never>? { rowTasks[id] }
 
     private func markUnavailable(_ id: UUID, issue: RecentFileIssue) {
         let availability: RecentMenuRow.Availability = issue == .missing ? .missing : .unavailable
@@ -279,10 +320,10 @@ final class RecentMenuController {
     }
 
     private static func makeRow(_ record: RecentHistoryRecord) -> RecentMenuRow {
-        let availability: RecentMenuRow.Availability = record.savedReference != nil ? .saved
-            : record.sourceReference != nil ? .sourceOnly : .unavailable
-        let detail = record.savedReference != nil ? "Saved copy" :
-            record.sourceReference != nil ? "Original only" : "File unavailable"
+        let availability: RecentMenuRow.Availability = record.savedReference != nil || record.sourceReference != nil
+            ? .checking : .unavailable
+        let detail = record.savedReference != nil ? "Checking saved copy…" :
+            record.sourceReference != nil ? "Checking original…" : "File unavailable"
         return RecentMenuRow(id: record.captureID, displayName: record.displayName,
             detectedAt: record.detectionDate, detail: detail, availability: availability,
             savedPath: record.savedReference?.lastKnownPath,

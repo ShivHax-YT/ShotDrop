@@ -19,6 +19,17 @@ struct RecentMenuRow: Identifiable, Sendable {
     let sourcePath: String?
     let previewImage: RecentPreviewImage?
     let copyConfirmation: CopyMode?
+
+    func allows(_ action: RecentMenuAction) -> Bool {
+        switch action {
+        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .revealSaved:
+            availability == .saved
+        case .revealOriginal: availability == .sourceOnly
+        case .retryFileCheck: availability == .unavailable || availability == .saved
+        case .removeFromRecents: availability == .missing
+        case .cancelCopyText: true
+        }
+    }
 }
 
 /// View-only panel. The controller validates a row and its file again for every action.
@@ -205,7 +216,7 @@ struct RecentMenuPanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(row.availability != .saved)
+            .disabled(!row.allows(.open))
             .focused($focusedID, equals: row.id)
             .accessibilityLabel("Open Screenshot, \(row.displayName)")
             .accessibilityValue(accessibilityValue(row))
@@ -216,7 +227,7 @@ struct RecentMenuPanel: View {
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
-            .disabled(row.availability != .saved)
+            .disabled(!row.allows(.copyPreferred))
             .accessibilityLabel(row.copyConfirmation.map { "Copied \($0.title.lowercased()) for \(row.displayName)" }
                 ?? "Copy \(preferredCopyMode.title.lowercased()) for \(row.displayName)")
             .help("Copy \(preferredCopyMode.title.lowercased()) for \(row.displayName)")
@@ -230,6 +241,7 @@ struct RecentMenuPanel: View {
             .menuStyle(.borderlessButton)
             .opacity(hoveredID == row.id || focusedID == row.id ? 1 : 0.35)
             .accessibilityLabel("More actions for \(row.displayName)")
+            .accessibilityValue(row.detail)
             .help("More actions for \(row.displayName)")
         }
         .frame(minHeight: rowHeight)
@@ -239,7 +251,7 @@ struct RecentMenuPanel: View {
         .onDisappear { onRowVisible(row.id, false) }
         .contextMenu { actionItems(row) }
         .accessibilityActions {
-            if row.availability == .saved && !isRecognizingText && textCopyStates[row.id] != .unavailable {
+            if row.allows(.copyText) && !isRecognizingText && textCopyStates[row.id] != .unavailable {
                 Button(ScreenshotTextCopyState.accessibilityActionTitle(for: textCopyStates[row.id], filename: row.displayName)) {
                     onAction(row.id, .copyText)
                 }
@@ -254,13 +266,13 @@ struct RecentMenuPanel: View {
     @ViewBuilder
     private func actionItems(_ row: RecentMenuRow) -> some View {
         Button("Open Screenshot") { onAction(row.id, .open) }
-            .disabled(row.availability != .saved)
+            .disabled(!row.allows(.open))
         Button("Copy Image") { onAction(row.id, .copyImage) }
-            .disabled(row.availability != .saved)
+            .disabled(!row.allows(.copyImage))
         Button("Copy File") { onAction(row.id, .copyFile) }
-            .disabled(row.availability != .saved)
+            .disabled(!row.allows(.copyFile))
         Button(ScreenshotTextCopyState.actionTitle(for: textCopyStates[row.id])) { onAction(row.id, .copyText) }
-            .disabled(row.availability != .saved || isRecognizingText || textCopyStates[row.id] == .unavailable)
+            .disabled(!row.allows(.copyText) || isRecognizingText || textCopyStates[row.id] == .unavailable)
             .accessibilityLabel(ScreenshotTextCopyState.accessibilityActionTitle(for: textCopyStates[row.id], filename: row.displayName))
             .help(isRecognizingText ? "One text recognition is already running. Try again when it finishes."
                   : "Recognize text on this Mac from this saved screenshot. The image stays on this Mac. Check the text after pasting; complex layouts may need correction.")
@@ -269,12 +281,13 @@ struct RecentMenuPanel: View {
                 .help("Discard this result. Another recognition can start when the current worker finishes.")
         }
         Button("Reveal in Finder") { onAction(row.id, .revealSaved) }
-            .disabled(row.availability != .saved)
-        if row.availability == .sourceOnly {
+            .disabled(!row.allows(.revealSaved))
+        if row.allows(.revealOriginal) {
             Button("Reveal Original") { onAction(row.id, .revealOriginal) }
         }
         if row.availability == .unavailable || textCopyStates[row.id] == .unavailable {
             Button("Retry File Check") { onAction(row.id, .retryFileCheck) }
+                .disabled(!row.allows(.retryFileCheck))
         }
         if row.availability == .missing {
             Button("Remove from Recents") { pendingRemoval = row.id }
