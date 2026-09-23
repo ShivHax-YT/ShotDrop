@@ -77,7 +77,13 @@ final class AnnotationEditorTests: XCTestCase {
         model.load(); await model.finishPendingWork()
         XCTAssertNil(model.document); XCTAssertNil(model.image)
         XCTAssertEqual(model.identity,fixture.identity)
-        XCTAssertTrue(model.message.contains("Restore the original"))
+        XCTAssertTrue(model.message.contains("Restore the saved copy"))
+        var recoveryRequests = 0
+        model.openRecents = { recoveryRequests += 1 }
+        model.openRecents?()
+        XCTAssertEqual(recoveryRequests, 1)
+        XCTAssertEqual(model.identity, fixture.identity)
+        XCTAssertNil(model.document)
         model.close()
     }
 

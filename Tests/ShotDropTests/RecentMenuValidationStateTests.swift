@@ -7,6 +7,48 @@ import XCTest
 final class RecentMenuValidationStateTests: XCTestCase {
     private let fileActions: [RecentMenuAction] = [.open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .revealSaved, .revealOriginal]
 
+    func testAnnotationCapacityFeedbackDoesNotReplaceOperatingHeader() async throws {
+        let fixture = try MenuStateFixture(); defer { fixture.remove() }
+        let id = try await fixture.addSaved()
+        let worker = MenuValidationWorker()
+        var requested: AnnotationSessionIdentity?
+        let controller = fixture.controller(worker, annotationAdmission: { requested = $0; return false })
+        await controller.reload(); controller.rowVisible(id, true); await worker.waitForStart(1)
+        let validation = controller.currentRowValidation(id)
+        await worker.complete(0, .success(.available(preview: nil, refreshedReference: nil)))
+        await validation?.value
+        let operatingStatus = controller.status
+        controller.perform(id, .annotate)
+        await controller.currentAnnotationRequest()?.value
+        XCTAssertEqual(controller.status, operatingStatus)
+        XCTAssertEqual(requested?.captureID, id)
+        XCTAssertEqual(requested?.reference, fixture.saved)
+        XCTAssertTrue(controller.annotationFeedback[id]?.contains("up to 3") == true)
+        XCTAssertEqual(controller.rows.first?.availability, .saved)
+    }
+
+    func testStaleAnnotationFeedbackIsLocalAndDoesNotOpenEditor() async throws {
+        let fixture = try MenuStateFixture(); defer { fixture.remove() }
+        let id = try await fixture.addSaved()
+        let worker = MenuValidationWorker()
+        var admissions = 0
+        let controller = fixture.controller(worker, annotationAdmission: { _ in admissions += 1; return true })
+        await controller.reload(); controller.rowVisible(id, true); await worker.waitForStart(1)
+        let validation = controller.currentRowValidation(id)
+        await worker.complete(0, .success(.available(preview: nil, refreshedReference: nil)))
+        await validation?.value
+        let snapshot = try await fixture.history.snapshot()
+        let current = try XCTUnwrap(snapshot.records.first)
+        _ = try await fixture.history.update(captureID: id, expectedRevision: current.revision,
+                                              change: .init(copyOutcome: .success))
+        let operatingStatus = controller.status
+        controller.perform(id, .annotate)
+        await controller.currentAnnotationRequest()?.value
+        XCTAssertEqual(admissions, 0)
+        XCTAssertEqual(controller.status, operatingStatus)
+        XCTAssertTrue(controller.annotationFeedback[id]?.contains("entry changed") == true)
+    }
+
     func testStoredReferenceStartsCheckingAndSuccessEnablesOnlySavedActions() async throws {
         let fixture = try MenuStateFixture(); defer { fixture.remove() }
         let id = try await fixture.addSaved()
@@ -170,9 +212,10 @@ private struct MenuStateFixture {
         return id
     }
 
-    func controller(_ worker: MenuValidationWorker) -> RecentMenuController {
+    func controller(_ worker: MenuValidationWorker, annotationAdmission: ((AnnotationSessionIdentity) -> Bool)? = nil) -> RecentMenuController {
         RecentMenuController(settings: AppSettings(defaults: defaults), history: history,
-                             rowValidator: { id, reference in try await worker.validate(id, reference) })
+                             rowValidator: { id, reference in try await worker.validate(id, reference) },
+                             annotationAdmission: annotationAdmission)
     }
 
     func remove() {

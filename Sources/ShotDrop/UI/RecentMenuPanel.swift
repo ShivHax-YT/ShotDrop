@@ -47,6 +47,7 @@ struct RecentMenuPanel: View {
     let onRowVisible: (UUID, Bool) -> Void
     var textCopyStates: [UUID: ScreenshotTextCopyState] = [:]
     var isRecognizingText = false
+    var annotationFeedback: [UUID: String] = [:]
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var rowHeight: CGFloat = 64
@@ -103,6 +104,15 @@ struct RecentMenuPanel: View {
                 guard let state = new[row.id], state != old[row.id], state != .copying else { continue }
                 NSAccessibility.post(element: panelWindow, notification: .announcementRequested,
                                      userInfo: [.announcement: "\(row.displayName): \(state.message)",
+                                                .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+            }
+        }
+        .onChange(of: annotationFeedback) { old, new in
+            guard let window = panelWindowReference.window else { return }
+            for row in rows {
+                guard let feedback = new[row.id], old[row.id] != feedback else { continue }
+                NSAccessibility.post(element: window, notification: .announcementRequested,
+                                     userInfo: [.announcement: "\(row.displayName): \(feedback)",
                                                 .priority: NSAccessibilityPriorityLevel.medium.rawValue])
             }
         }
@@ -203,6 +213,13 @@ struct RecentMenuPanel: View {
                             .font(.system(size: detailSize))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                        if let feedback = annotationFeedback[row.id] {
+                            Text(feedback)
+                                .font(.system(size: detailSize))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("recent.annotationStatus.\(row.id.uuidString)")
+                        }
                         if let textState = textCopyStates[row.id] {
                             Text(textState.message)
                                 .font(.system(size: detailSize))
@@ -319,7 +336,7 @@ struct RecentMenuPanel: View {
     }
 
     private func accessibilityValue(_ row: RecentMenuRow) -> String {
-        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(textCopyStates[row.id]?.message ?? ""). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
+        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(textCopyStates[row.id]?.message ?? ""). \(annotationFeedback[row.id] ?? ""). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
     }
 
     private func makeImage(_ preview: RecentPreviewImage) -> NSImage? {

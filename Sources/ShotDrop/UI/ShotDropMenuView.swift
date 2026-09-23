@@ -22,6 +22,7 @@ struct ShotDropMenuView: View {
                         onPanelVisible: controller.panelVisible,
                         onRowVisible: controller.rowVisible,
                         textCopyStates: controller.textCopy.states,
-                        isRecognizingText: controller.textCopy.activeID != nil)
+                        isRecognizingText: controller.textCopy.activeID != nil,
+                        annotationFeedback: controller.annotationFeedback)
     }
 }

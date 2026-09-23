@@ -2,17 +2,10 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// A session never follows a newer capture revision or substitutes another source.
-struct AnnotationSessionIdentity: Equatable, Sendable {
-    let captureID: UUID
-    let revision: UInt64
-    let reference: RecentFileReference
-}
-
 @MainActor @Observable
 final class AnnotationEditorModel {
     let identity: AnnotationSessionIdentity
-    private let renderer = AnnotationRenderer()
+    private let renderer: AnnotationRenderer
     private let sourceLoader: (@Sendable (RecentFileReference) async throws -> AnnotationSource)?
     private let previewRenderer: (@Sendable (AnnotationSource, AnnotationState) async throws -> AnnotationRaster)?
     private(set) var rendering = false
@@ -34,11 +27,12 @@ final class AnnotationEditorModel {
     private var task: Task<Void, Never>?
     private var previewRequested = false
     private var shouldAnnouncePreviewResult = false
+    @ObservationIgnored var openRecents: (() -> Void)?
     @ObservationIgnored var announceResult: ((String) -> Void)?
     private var closed = false
     static let exportUnavailable = AnnotationExportAvailability.explanation
 
-    init(identity: AnnotationSessionIdentity, sourceLoader: (@Sendable (RecentFileReference) async throws -> AnnotationSource)? = nil, previewRenderer: (@Sendable (AnnotationSource, AnnotationState) async throws -> AnnotationRaster)? = nil) { self.identity = identity; self.sourceLoader = sourceLoader; self.previewRenderer = previewRenderer }
+    init(identity: AnnotationSessionIdentity, renderer: AnnotationRenderer = AnnotationRenderer(), sourceLoader: (@Sendable (RecentFileReference) async throws -> AnnotationSource)? = nil, previewRenderer: (@Sendable (AnnotationSource, AnnotationState) async throws -> AnnotationRaster)? = nil) { self.identity = identity; self.renderer = renderer; self.sourceLoader = sourceLoader; self.previewRenderer = previewRenderer }
     func load() {
         guard task == nil, source == nil, !closed else { return }
         busy = true
@@ -55,7 +49,7 @@ final class AnnotationEditorModel {
                 shouldAnnouncePreviewResult = true
                 message = "Original unchanged · Preview only. Visual blur is not secure redaction."
             } catch {
-                message = "Screenshot unavailable. Restore the original file, then retry."
+                message = "Screenshot unavailable. Restore the saved copy, then retry, or open Recents to check its last saved location."
                 if !closed { announceResult?(message + " Retry Image.") }
             }
             busy = false; task = nil
@@ -160,18 +154,34 @@ final class AnnotationEditorModel {
 
 @MainActor
 final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
-    private var controller: NSWindowController?
-    private(set) var model: AnnotationEditorModel?
-    private(set) var isClosing = false
-    /// Returns false when another immutable session already owns the editor.
-    @discardableResult func open(identity: AnnotationSessionIdentity) -> Bool {
-        guard !isClosing else { return false }
-        if let model {
-            controller?.showWindow(nil); controller?.window?.makeKeyAndOrderFront(nil)
-            if model.identity != identity { model.message = "Another image is being edited. Close this editor before opening a different capture."; return false }
+    private struct Session {
+        let model: AnnotationEditorModel
+        let controller: NSWindowController
+    }
+    private var registry = AnnotationSessionRegistry()
+    private var sessions: [UUID: Session] = [:]
+    // All admitted windows share one renderer, including uncancellable decoder work.
+    private let renderer = AnnotationRenderer()
+    private(set) var admissionMessage: String?
+
+    @discardableResult func open(identity: AnnotationSessionIdentity, openRecents: @escaping () -> Void) -> Bool {
+        admissionMessage = nil
+        let token: UUID
+        switch registry.admit(identity) {
+        case .existing(let existing):
+            sessions[existing]?.controller.showWindow(nil)
+            sessions[existing]?.controller.window?.makeKeyAndOrderFront(nil)
             return true
+        case .closing:
+            admissionMessage = "This annotation is still closing. Try again when it finishes."
+            return false
+        case .full:
+            admissionMessage = "You can edit up to 3 screenshots. Close an annotation window to open another."
+            return false
+        case .opened(let admitted): token = admitted
         }
-        let model = AnnotationEditorModel(identity: identity)
+        let model = AnnotationEditorModel(identity: identity, renderer: renderer)
+        model.openRecents = openRecents
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 620),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Annotate — " + URL(fileURLWithPath: identity.reference.lastKnownPath).lastPathComponent
@@ -186,12 +196,14 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
         }
         window.contentView = NSHostingView(rootView: AnnotationEditorView(model: model))
         window.center()
-        self.model = model; controller = NSWindowController(window: window)
-        controller?.showWindow(nil); window.makeKeyAndOrderFront(nil); model.load()
+        let controller = NSWindowController(window: window)
+        sessions[token] = Session(model: model, controller: controller)
+        controller.showWindow(nil); window.makeKeyAndOrderFront(nil); model.load()
         return true
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard model?.document?.isDirty == true else { return true }
+        guard let model = sessions.values.first(where: { $0.controller.window === sender })?.model,
+              model.document?.isDirty == true else { return true }
         let alert = NSAlert()
         alert.messageText = "Keep your annotation edits?"
         alert.informativeText = "Unsaved edits will be lost if you discard them. Saving annotations is not available yet."
@@ -202,11 +214,14 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
         return alert.runModal() == .alertSecondButtonReturn
     }
     func windowWillClose(_ notification: Notification) {
-        guard let model else { return }
-        isClosing = true; model.close()
+        guard let window = notification.object as? NSWindow,
+              let (token, session) = sessions.first(where: { $0.value.controller.window === window }),
+              registry.beginClosing(token: token) else { return }
+        session.model.close()
         Task { [self] in
-            await model.finishPendingWork()
-            self.model = nil; controller = nil; isClosing = false
+            await session.model.finishPendingWork()
+            guard registry.releaseAfterDrain(token: token) else { return }
+            sessions.removeValue(forKey: token)
         }
     }
 }
@@ -304,7 +319,14 @@ private struct AnnotationEditorView: View {
                     return .handled
                 }
             } else {
-                VStack { if model.busy { ProgressView() }; Text(model.message); Button(model.source == nil ? "Retry Image" : "Retry Preview",action: model.retry).disabled(model.busy || model.rendering) }
+                VStack {
+                    if model.busy { ProgressView() }
+                    Text(model.message)
+                    Button(model.source == nil ? "Retry Image" : "Retry Preview", action: model.retry).disabled(model.busy || model.rendering)
+                    if model.source == nil, !model.busy {
+                        Button("Open Recents") { model.openRecents?() }.disabled(model.openRecents == nil)
+                    }
+                }
                     .padding().frame(maxWidth: .infinity,maxHeight: .infinity)
             }
         }.background(Color(nsColor: .underPageBackgroundColor))

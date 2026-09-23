@@ -11,6 +11,11 @@ final class RecentMenuController {
     private let validateRow: RowValidator
     private let settings: AppSettings
     private let annotationEditor = AnnotationEditorCoordinator()
+    private let annotationAdmission: ((AnnotationSessionIdentity) -> Bool)?
+    @ObservationIgnored private lazy var annotationRecents = AnnotationRecentsRecoveryCoordinator(history: history)
+    private var annotationTask: Task<Void, Never>?
+    private var annotationToken: UUID?
+    private(set) var annotationFeedback: [UUID: String] = [:]
     private var records: [UUID: RecentHistoryRecord] = [:]
     private var rowTasks: [UUID: Task<Void, Never>] = [:]
     private var rowValidationTokens: [UUID: UUID] = [:]
@@ -24,7 +29,9 @@ final class RecentMenuController {
     private(set) var historyUnavailable = false
 
     init(settings: AppSettings, history: RecentHistoryStore = RecentHistoryStore(),
-         previews: RecentPreviewCache = RecentPreviewCache(), rowValidator: RowValidator? = nil) {
+         previews: RecentPreviewCache = RecentPreviewCache(), rowValidator: RowValidator? = nil,
+         annotationAdmission: ((AnnotationSessionIdentity) -> Bool)? = nil) {
+        self.annotationAdmission = annotationAdmission
         self.settings = settings
         self.history = history
         self.previews = previews
@@ -68,6 +75,7 @@ final class RecentMenuController {
             historyUnavailable = false
             records = Dictionary(uniqueKeysWithValues: snapshot.records.map { ($0.captureID, $0) })
             textCopy.retain(Set(records.keys))
+            annotationFeedback = annotationFeedback.filter { records[$0.key] != nil }
             rows = snapshot.records.map(Self.makeRow)
             for id in visibleRows { checkRow(id) }
         } catch {
@@ -106,16 +114,26 @@ final class RecentMenuController {
         guard let record = records[id], rows.first(where: { $0.id == id })?.allows(action) == true else { return }
         if action == .annotate {
             guard let reference = record.savedReference, reference.role == .savedCopy else { return }
-            Task {
-                guard let latest = try? await history.snapshot(),
-                      latest.records.first(where: { $0.captureID == id }) == record,
+            annotationTask?.cancel()
+            let token = UUID()
+            annotationToken = token
+            annotationFeedback[id] = nil
+            annotationTask = Task {
+                let latest = try? await history.snapshot()
+                guard !Task.isCancelled, annotationToken == token else { return }
+                defer { annotationTask = nil; annotationToken = nil }
+                guard latest?.records.first(where: { $0.captureID == id }) == record,
                       records[id] == record else {
-                    status = "Entry changed; try again"
+                    annotationFeedback[id] = "This saved entry changed. Refresh Recents and try Annotate again."
                     return
                 }
                 let identity = AnnotationSessionIdentity(captureID: id, revision: record.revision, reference: reference)
-                if !annotationEditor.open(identity: identity) {
-                    status = "Finish the open annotation before editing another screenshot"
+                let admitted = annotationAdmission?(identity) ?? annotationEditor.open(identity: identity, openRecents: { [weak owner = self] in
+                    owner?.annotationRecents.show()
+                })
+                if !admitted {
+                    annotationFeedback[id] = annotationEditor.admissionMessage
+                        ?? "You can edit up to 3 screenshots. Close an annotation window to open another."
                 }
             }
             return
@@ -199,6 +217,8 @@ final class RecentMenuController {
             }
         }
     }
+
+    func currentAnnotationRequest() -> Task<Void, Never>? { annotationTask }
 
     private func copyMode(for action: RecentMenuAction) -> CopyMode {
         switch action {
