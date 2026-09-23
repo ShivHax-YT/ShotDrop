@@ -53,6 +53,7 @@ struct ShotDropSettingsView: View {
             }
 
             Section("General") {
+                Toggle("Show ShotDrop Thumbnail", isOn: $settings.showShotDropThumbnail)
                 Toggle("Play a sound after saving", isOn: $settings.playSound)
                 Toggle("Launch at login", isOn: Binding(
                     get: { launchAtLogin.isEnabled },

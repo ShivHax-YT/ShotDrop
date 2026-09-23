@@ -27,6 +27,7 @@ final class AppSettings {
         static let organizeByDate = "organizeByDate"
         static let playSound = "playSound"
         static let hasPresentedSetup = "hasPresentedSetup"
+        static let showShotDropThumbnail = "showShotDropThumbnail"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -56,6 +57,10 @@ final class AppSettings {
         didSet { defaults.set(hasPresentedSetup, forKey: Key.hasPresentedSetup) }
     }
 
+    var showShotDropThumbnail: Bool {
+        didSet { defaults.set(showShotDropThumbnail, forKey: Key.showShotDropThumbnail) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         destinationPath = defaults.string(forKey: Key.destinationPath)
@@ -66,5 +71,6 @@ final class AppSettings {
         organizeByDate = defaults.bool(forKey: Key.organizeByDate)
         playSound = defaults.bool(forKey: Key.playSound)
         hasPresentedSetup = defaults.bool(forKey: Key.hasPresentedSetup)
+        showShotDropThumbnail = defaults.object(forKey: Key.showShotDropThumbnail) as? Bool ?? true
     }
 }

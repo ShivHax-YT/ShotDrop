@@ -84,6 +84,14 @@ Feedback stays on the invoked row and does not replace capture/save outcomes. Co
 
 References: [Vision text recognition](https://developer.apple.com/documentation/vision/vnrecognizetextrequest), [pasteboard ownership](https://developer.apple.com/documentation/appkit/nspasteboard/).
 
+## Dormant ordered pipeline and explicit pins
+
+`ScreenshotPipeline` is an injected coordinator with no production startup instance. Detector events retain first-observation sequence/time across readiness retries. The coordinator bounds ingress and pending jobs, serializes saves, prepares at most two jobs concurrently, and rejects older clipboard completions after a newer publication. Manual clipboard intents and external change counts fence pending automatic writes. Saved receipts remain independently reportable when copy is cancelled; session identifiers fence stale UI/history consumers. Production capture/save admission still requires the unresolved legacy-accounting policy and reviewed integration.
+
+Explicit saved-row Pin uses an immutable capture/revision/reference identity. Three sessions share one bounded decoder; closing work retains its reservation until native decoding finishes. Previews have a 2048-pixel maximum edge and a 64 MiB retained RGBA cache budget; these are application limits, not process RSS guarantees. Pin image copying uses the displayed immutable pixels and identifies reduced previews. Open, Reveal and Copy File revalidate the saved reference; missing/replaced files never retarget the pin. Native URL handoffs remain subject to filesystem changes after verification. Pins use ordinary floating panels on the current Space; All Desktops remains hidden pending live validation.
+
+The selectively integrated ShotDrop thumbnail remains dormant. It accepts a saved identity, coalesces pending arrivals, decodes off the main actor, and holds cancellation reservations until work exits. Image copy uses its snapshot; file actions and drag verify the saved reference. No URL-only loading, automatic capture hook, installed-app change or permission bypass is introduced by this source integration.
+
 ## Permissions
 TCC "Desktop folder" access prompt when reading ~/Desktop. No Screen Recording permission is needed unless we add our own capture (ScreenCaptureKit) in v1.1.
 

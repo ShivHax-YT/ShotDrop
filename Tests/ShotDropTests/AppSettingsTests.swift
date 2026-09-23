@@ -14,6 +14,7 @@ final class AppSettingsTests: XCTestCase {
             XCTAssertFalse(settings.organizeByDate)
             XCTAssertFalse(settings.playSound)
             XCTAssertFalse(settings.hasPresentedSetup)
+            XCTAssertTrue(settings.showShotDropThumbnail)
         }
     }
 
@@ -27,6 +28,7 @@ final class AppSettingsTests: XCTestCase {
             settings.organizeByDate = true
             settings.playSound = true
             settings.hasPresentedSetup = true
+            settings.showShotDropThumbnail = false
 
             let reloaded = AppSettings(defaults: defaults)
             XCTAssertEqual(reloaded.destinationPath, settings.destinationPath)
@@ -35,14 +37,17 @@ final class AppSettingsTests: XCTestCase {
             XCTAssertTrue(reloaded.organizeByDate)
             XCTAssertTrue(reloaded.playSound)
             XCTAssertTrue(reloaded.hasPresentedSetup)
+            XCTAssertFalse(reloaded.showShotDropThumbnail)
 
             reloaded.organizeByDate = false
             reloaded.playSound = false
             reloaded.copyMode = .image
+            reloaded.showShotDropThumbnail = true
             let reset = AppSettings(defaults: defaults)
             XCTAssertFalse(reset.organizeByDate)
             XCTAssertFalse(reset.playSound)
             XCTAssertEqual(reset.copyMode, .image)
+            XCTAssertTrue(reset.showShotDropThumbnail)
         }
     }
 
