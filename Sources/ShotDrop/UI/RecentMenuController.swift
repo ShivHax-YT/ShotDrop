@@ -12,6 +12,8 @@ final class RecentMenuController {
     private var rowTasks: [UUID: Task<Void, Never>] = [:]
     private var visibleRows: Set<UUID> = []
     private var generation: UInt64 = 0
+    private var clipboardGeneration: UInt64 = 0
+    let textCopy = ScreenshotTextCopyController(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general))
 
     private(set) var rows: [RecentMenuRow] = []
     private(set) var status = "Setup needed · Not watching"
@@ -23,6 +25,7 @@ final class RecentMenuController {
         if visible {
             Task { await reload() }
         } else {
+            textCopy.cancel()
             generation &+= 1
             visibleRows.removeAll()
             for task in rowTasks.values { task.cancel() }
@@ -54,17 +57,20 @@ final class RecentMenuController {
             guard generation == requestGeneration else { return }
             historyUnavailable = false
             records = Dictionary(uniqueKeysWithValues: snapshot.records.map { ($0.captureID, $0) })
+            textCopy.retain(Set(records.keys))
             rows = snapshot.records.map(Self.makeRow)
             for id in visibleRows { checkRow(id) }
         } catch {
             guard generation == requestGeneration else { return }
             historyUnavailable = true
             records.removeAll()
+            textCopy.retain([])
             rows = []
         }
     }
 
     func clearHistory() {
+        textCopy.cancel()
         Task {
             do {
                 try await history.clear()
@@ -84,6 +90,27 @@ final class RecentMenuController {
 
     func perform(_ id: UUID, _ action: RecentMenuAction) {
         guard let record = records[id] else { return }
+        if action == .cancelCopyText {
+            if textCopy.activeID == id { textCopy.cancel() }
+            return
+        }
+        if action == .copyText {
+            guard rows.first(where: { $0.id == id })?.availability == .saved else { return }
+            let requestGeneration = generation
+            if textCopy.start(record, isCurrent: { [weak self] expected in
+                guard let self, self.generation == requestGeneration,
+                      self.records[id] == expected,
+                      let snapshot = try? await self.history.snapshot() else { return false }
+                return self.generation == requestGeneration && self.records[id] == expected
+                    && snapshot.records.first(where: { $0.captureID == id }) == expected
+            }) { clipboardGeneration &+= 1 }
+            return
+        }
+        if action == .copyPreferred || action == .copyImage || action == .copyFile {
+            clipboardGeneration &+= 1
+            textCopy.cancel()
+        }
+        let clipboardToken = clipboardGeneration
         if action == .retryFileCheck { checkRow(id); return }
         if action == .removeFromRecents {
             guard rows.first(where: { $0.id == id })?.availability == .missing else { return }
@@ -135,8 +162,9 @@ final class RecentMenuController {
                         status = "Could not reveal screenshot in Finder"
                     }
                 case .copyPreferred, .copyImage, .copyFile:
-                    await copy(file, id: id, mode: copyMode(for: action), generation: requestGeneration)
-                case .retryFileCheck, .removeFromRecents: break
+                    await copy(file, id: id, mode: copyMode(for: action), generation: requestGeneration,
+                               clipboardToken: clipboardToken)
+                case .copyText, .cancelCopyText, .retryFileCheck, .removeFromRecents: break
                 }
             }
         }
@@ -151,20 +179,21 @@ final class RecentMenuController {
     }
 
     private func copy(_ file: RecentResolvedFile, id: UUID, mode: CopyMode,
-                      generation requestGeneration: UInt64) async {
+                      generation requestGeneration: UInt64, clipboardToken: UInt64) async {
         guard file.role == .savedCopy, let expectedRevision = records[id]?.revision else { return }
         do {
             let request = ScreenshotClipboardRequest(sourceURL: file.url, mode: mode,
                 expectedIdentity: file.liveIdentity, survivingFileURL: file.url,
                 survivingFileIdentity: file.liveIdentity)
             let prepared = try await ScreenshotClipboardPreparer().prepare(request)
-            guard generation == requestGeneration else { return }
+            guard generation == requestGeneration, clipboardGeneration == clipboardToken else { return }
             let latest = try await history.snapshot()
             guard latest.records.first(where: { $0.captureID == id })?.revision == expectedRevision,
                   records[id]?.revision == expectedRevision else { return }
             _ = try await ScreenshotClipboardPublisher(writer:
                 AppKitScreenshotPasteboardWriter(pasteboard: .general)).publish(prepared) {
                     guard self.generation == requestGeneration,
+                          self.clipboardGeneration == clipboardToken,
                           self.records[id]?.revision == expectedRevision else {
                         throw RecentHistoryStoreError.staleRevision
                     }
@@ -203,6 +232,7 @@ final class RecentMenuController {
             case .unavailable(let issue): markUnavailable(id, issue: issue)
             case .available(let file):
                 let key = RecentPreviewKey(captureID: id, reference: reference)
+                textCopy.clearUnavailable(id)
                 do {
                     let image = try await previews.thumbnail(for: key) {
                         guard case .available(let verified) = RecentFileResolver().resolve(reference) else {

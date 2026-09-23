@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum RecentMenuAction: Sendable {
-    case open, copyPreferred, copyImage, copyFile, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
+    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
 }
 
 struct RecentMenuRow: Identifiable, Sendable {
@@ -34,6 +34,8 @@ struct RecentMenuPanel: View {
     let onOpenSettings: () -> Void
     let onPanelVisible: (Bool) -> Void
     let onRowVisible: (UUID, Bool) -> Void
+    var textCopyStates: [UUID: ScreenshotTextCopyState] = [:]
+    var isRecognizingText = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var rowHeight: CGFloat = 64
@@ -43,6 +45,7 @@ struct RecentMenuPanel: View {
     @State private var hoveredID: UUID?
     @State private var clearRequested = false
     @State private var pendingRemoval: UUID?
+    @State private var panelWindowReference = RecentPanelWindowReference()
     @FocusState private var focusedID: UUID?
 
     var body: some View {
@@ -76,12 +79,22 @@ struct RecentMenuPanel: View {
         .frame(width: 352, height: min(560, max(0, availableHeight - 32)))
         .background(.regularMaterial)
         .background(RecentPanelWindowReader { window in
+            panelWindowReference.window = window
             availableHeight = window.screen?.visibleFrame.height
                 ?? NSScreen.main?.visibleFrame.height ?? 592
         }.frame(width: 0, height: 0))
         .onAppear { availableHeight = NSScreen.main?.visibleFrame.height ?? 592 }
         .onAppear { onPanelVisible(true) }
         .onDisappear { onPanelVisible(false) }
+        .onChange(of: textCopyStates) { old, new in
+            guard let panelWindow = panelWindowReference.window else { return }
+            for row in rows {
+                guard let state = new[row.id], state != old[row.id], state != .copying else { continue }
+                NSAccessibility.post(element: panelWindow, notification: .announcementRequested,
+                                     userInfo: [.announcement: "\(row.displayName): \(state.message)",
+                                                .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+            }
+        }
         .confirmationDialog("Clear recent history? Screenshot files will stay in their folders.",
                             isPresented: $clearRequested) {
             Button("Clear History", role: .destructive, action: onClearHistory)
@@ -179,6 +192,13 @@ struct RecentMenuPanel: View {
                             .font(.system(size: detailSize))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                        if let textState = textCopyStates[row.id] {
+                            Text(textState.message)
+                                .font(.system(size: detailSize))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("recent.textStatus.\(row.id.uuidString)")
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -218,6 +238,14 @@ struct RecentMenuPanel: View {
         .onAppear { onRowVisible(row.id, true) }
         .onDisappear { onRowVisible(row.id, false) }
         .contextMenu { actionItems(row) }
+        .accessibilityActions {
+            if row.availability == .saved && !isRecognizingText && textCopyStates[row.id] != .unavailable {
+                Button("Copy Text from \(row.displayName)") { onAction(row.id, .copyText) }
+            }
+            if textCopyStates[row.id] == .recognizing {
+                Button("Cancel Text Recognition for \(row.displayName)") { onAction(row.id, .cancelCopyText) }
+            }
+        }
         .help("\(row.displayName)\n\(row.savedPath ?? row.sourcePath ?? "No file path")\n\(row.detectedAt.formatted(date: .complete, time: .complete))")
     }
 
@@ -229,12 +257,21 @@ struct RecentMenuPanel: View {
             .disabled(row.availability != .saved)
         Button("Copy File") { onAction(row.id, .copyFile) }
             .disabled(row.availability != .saved)
+        Button(textCopyStates[row.id]?.offersRetry == true ? "Try Copying Text Again" : "Copy Text") { onAction(row.id, .copyText) }
+            .disabled(row.availability != .saved || isRecognizingText || textCopyStates[row.id] == .unavailable)
+            .accessibilityLabel("Copy Text from \(row.displayName)")
+            .help(isRecognizingText ? "One text recognition is already running. Try again when it finishes."
+                  : "Recognize text on this Mac from this saved screenshot. The image stays on this Mac. Check the text after pasting; complex layouts may need correction.")
+        if textCopyStates[row.id] == .recognizing {
+            Button("Cancel Text Recognition") { onAction(row.id, .cancelCopyText) }
+                .help("Discard this result. Another recognition can start when the current worker finishes.")
+        }
         Button("Reveal in Finder") { onAction(row.id, .revealSaved) }
             .disabled(row.availability != .saved)
         if row.availability == .sourceOnly {
             Button("Reveal Original") { onAction(row.id, .revealOriginal) }
         }
-        if row.availability == .unavailable {
+        if row.availability == .unavailable || textCopyStates[row.id] == .unavailable {
             Button("Retry File Check") { onAction(row.id, .retryFileCheck) }
         }
         if row.availability == .missing {
@@ -261,7 +298,7 @@ struct RecentMenuPanel: View {
     }
 
     private func accessibilityValue(_ row: RecentMenuRow) -> String {
-        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
+        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(textCopyStates[row.id]?.message ?? ""). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
     }
 
     private func makeImage(_ preview: RecentPreviewImage) -> NSImage? {
@@ -279,6 +316,11 @@ struct RecentMenuPanel: View {
                                   intent: .defaultIntent) else { return nil }
         return NSImage(cgImage: image, size: NSSize(width: preview.width, height: preview.height))
     }
+}
+
+@MainActor
+private final class RecentPanelWindowReference {
+    weak var window: NSWindow?
 }
 
 private struct RecentPanelWindowReader: NSViewRepresentable {

@@ -20,6 +20,8 @@ struct ShotDropMenuView: View {
                             openSettings()
                         },
                         onPanelVisible: controller.panelVisible,
-                        onRowVisible: controller.rowVisible)
+                        onRowVisible: controller.rowVisible,
+                        textCopyStates: controller.textCopy.states,
+                        isRecognizingText: controller.textCopy.activeID != nil)
     }
 }

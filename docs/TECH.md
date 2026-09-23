@@ -64,6 +64,18 @@ The view uses native existing-folder panels, standard window chrome, semantic co
 
 Frontmost app: `NSWorkspace.shared.frontmostApplication` sampled at detection time is only a best-effort naming hint. History remains future work (small JSON store or SQLite).
 
+## Explicit local Copy Text (#240)
+
+The Recent row's Copy Text action uses only its verified saved-copy reference, immutable capture ID and record revision. It does not use the original, thumbnail, current selection, or automatic capture monitoring. One job is admitted with no pending queue; cancel, panel dismissal, history removal, or a newer manual image/file Copy fence late publication. Cancellation retains the admission slot until synchronous Vision work returns. Other row actions remain available, and the configured Image/File/Both mode is unchanged.
+
+The concurrent worker resolves and hashes the saved file, checks at most 64 MiB encoded input, one frame and 32 million pixels, then uses full-resolution ImageIO pixels with EXIF orientation passed once to an accurate `VNRecognizeTextRequest`. PNG dimensions are checked before ImageIO initialization; other supported decoders supply metadata before full image creation. Framework-internal allocations are not governed by an app-level RSS guarantee. Output assembly is capped at 1 MiB UTF-8; Unicode and Vision line order are retained, with no promise of correct columns or RTL reconstruction. Recognized text is neither persisted nor logged, and no network/fallback provider is used.
+
+Before publishing, file identity is revalidated and the history record, job generation and pasteboard change count must still match. One `.string` item is prepared before pasteboard ownership changes. There is no actor suspension between the final clipboard order check and write. Invalid, empty, cancelled and stale results do not touch the clipboard. AppKit's `prepareForNewContents` clears prior contents; a subsequent failed write cannot promise preservation or rollback without reading the prior clipboard, which ShotDrop does not do. That failure says the clipboard may have changed and offers an explicit retry. External-process pasteboard writes cannot be made atomic with a change-count comparison.
+
+Feedback stays on the invoked row and does not replace capture/save outcomes. Copy Text, retry and cancellation are menu/VoiceOver actions. Success is brief and requires a successful plain-text write. The controller tests use injected workers and private pasteboards. A synthetic real Vision test checks upright, EXIF-rotated and blank images; its first model-initialization run took 53.405 seconds and the immediately following rotated recognition took 0.080 seconds. These isolated observations are not p50/p95 or performance acceptance. Offline representative corpus, peak memory, responsiveness, actual menu/VoiceOver and consumer-paste testing remain final exact-build QA gates. The parked thumbnail is not integrated here.
+
+References: [Vision text recognition](https://developer.apple.com/documentation/vision/vnrecognizetextrequest), [pasteboard ownership](https://developer.apple.com/documentation/appkit/nspasteboard/).
+
 ## Permissions
 TCC "Desktop folder" access prompt when reading ~/Desktop. No Screen Recording permission is needed unless we add our own capture (ScreenCaptureKit) in v1.1.
 
