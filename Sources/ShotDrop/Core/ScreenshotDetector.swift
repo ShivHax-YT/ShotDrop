@@ -7,6 +7,22 @@ struct DetectedScreenshot: Sendable {
     let readinessLatency: Duration
     let candidateToReadyLatency: Duration
     let readinessAttempts: Int
+    /// Order assigned when first observed, before concurrent readiness work; scoped to one start.
+    let observationSequence: UInt64
+    /// Observation time, not an assertion of the system screenshot's capture time.
+    let observedAt: Date
+
+    init(url: URL, identity: ScreenshotFileIdentity, readinessLatency: Duration,
+         candidateToReadyLatency: Duration, readinessAttempts: Int,
+         observationSequence: UInt64 = 0, observedAt: Date = Date(timeIntervalSince1970: 0)) {
+        self.url = url
+        self.identity = identity
+        self.readinessLatency = readinessLatency
+        self.candidateToReadyLatency = candidateToReadyLatency
+        self.readinessAttempts = readinessAttempts
+        self.observationSequence = observationSequence
+        self.observedAt = observedAt
+    }
 }
 
 /// Explicitly started by a future permission/pipeline coordinator, never by app initialization.
@@ -46,7 +62,13 @@ actor ScreenshotDetector {
     private var queuedSet: Set<URL> = []
     private var pending: [URL: PendingCheck] = [:]
     private var changedWhilePending: Set<URL> = []
-    private var firstObserved: [URL: ContinuousClock.Instant] = [:]
+    private struct Observation {
+        let instant: ContinuousClock.Instant
+        let date: Date
+        let sequence: UInt64
+    }
+    private var firstObserved: [URL: Observation] = [:]
+    private var observationSequence: UInt64 = 0
     private var startupEvents: [ScreenshotWatchEvent] = []
 
     private struct PendingCheck {
@@ -93,6 +115,7 @@ actor ScreenshotDetector {
         let token = UUID()
         generation = token
         status = .starting
+        observationSequence = 0
         let startedAt = wallTimeNanoseconds()
 
         do {
@@ -223,7 +246,9 @@ actor ScreenshotDetector {
     }
 
     private func enqueue(_ urls: [URL]) {
-        for candidate in urls {
+        // Watcher batches and directory enumerations do not promise order. Give ties a
+        // stable path order before any readiness task can complete.
+        for candidate in urls.sorted(by: { $0.standardizedFileURL.path < $1.standardizedFileURL.path }) {
             let url = candidate.standardizedFileURL
             guard accepts(url) else { continue }
             if pending[url] != nil {
@@ -233,9 +258,19 @@ actor ScreenshotDetector {
             guard !queuedSet.contains(url) else { continue }
             if let identity = try? fileSystem.identity(at: url),
                historical.contains(identity) || emitted.contains(identity) { continue }
+            if firstObserved[url] == nil {
+                // Never wrap and make new work appear older than an earlier observation.
+                guard observationSequence < UInt64.max else {
+                    logger.error("Screenshot observation sequence exhausted; restart detection before admitting more candidates.")
+                    continue
+                }
+                observationSequence += 1
+                firstObserved[url] = Observation(instant: .now,
+                    date: Date(timeIntervalSince1970: Double(wallTimeNanoseconds()) / 1_000_000_000),
+                    sequence: observationSequence)
+            }
             queued.append(url)
             queuedSet.insert(url)
-            firstObserved[url] = .now
         }
         scheduleChecks()
     }
@@ -265,13 +300,16 @@ actor ScreenshotDetector {
     ) {
         guard generation == session, pending[url]?.token == token else { return }
         pending.removeValue(forKey: url)
-        let observed = firstObserved.removeValue(forKey: url)
+        let observed = firstObserved[url]
         let changed = changedWhilePending.remove(url) != nil
         defer {
             if changed { enqueue([url]) }
+            // A hint received while checking may retry the same pending observation.
+            // Preserve its sequence/time through that retry, but release completed state.
+            if pending[url] == nil && !queuedSet.contains(url) { firstObserved.removeValue(forKey: url) }
             scheduleChecks()
         }
-        guard let result else {
+        guard let result, let observed else {
             logger.debug("Candidate did not become ready within the bounded retry window.")
             return
         }
@@ -283,14 +321,15 @@ actor ScreenshotDetector {
         guard !historical.contains(identity), !emitted.contains(identity),
               let current = try? fileSystem.identity(at: url), current == identity else { return }
         emitted.insert(identity)
-        let candidateLatency = observed?.duration(to: .now) ?? result.latency
+        let candidateLatency = observed.instant.duration(to: .now)
         let parts = candidateLatency.components
         let milliseconds = Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15
         logger.info("Verified screenshot; candidate-to-ready ms=\(milliseconds), attempts=\(result.attempts)")
         onScreenshot(DetectedScreenshot(
             url: url, identity: identity, readinessLatency: result.latency,
             candidateToReadyLatency: candidateLatency,
-            readinessAttempts: result.attempts
+            readinessAttempts: result.attempts, observationSequence: observed.sequence,
+            observedAt: observed.date
         ))
     }
 }

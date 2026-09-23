@@ -304,7 +304,7 @@ final class ScreenshotDetectorTests: XCTestCase {
 
     func testReplacementEventWhileOldIdentityIsPendingIsRetried() async throws {
         let url = folder.appendingPathComponent("replaced-while-pending.png")
-        let sentinel = folder.appendingPathComponent("historical-barrier.png")
+        let sentinel = folder.appendingPathComponent("zzz-historical-barrier.png")
         let original = shot(inode: 1)
         let replacement = shot(inode: 2)
         let fileSystem = DetectorFixtureFileSystem([sentinel: shot(inode: 99, birth: 1)])
@@ -315,6 +315,7 @@ final class ScreenshotDetectorTests: XCTestCase {
         let clock = DetectorGateClock { suspended.fulfill() }
         let detector = makeDetector(fileSystem: fileSystem, watcher: watcher, clock: clock) { screenshot in
             XCTAssertEqual(screenshot.identity, replacement.identity)
+            XCTAssertEqual(screenshot.observationSequence, 1, "Pending replacement retry keeps admission order")
             emitted.fulfill()
         }
         try await detector.start(in: folder)
@@ -365,6 +366,68 @@ final class ScreenshotDetectorTests: XCTestCase {
         let stops = await watcher.stopCount
         XCTAssertEqual(stops, 1)
         XCTAssertEqual(fileSystem.contentsReadCount, 0)
+        await detector.stop()
+    }
+
+    func testReversedReadinessPreservesObservationOrderAndTime() async throws {
+        let older = folder.appendingPathComponent("older.png")
+        let newer = folder.appendingPathComponent("newer.png")
+        let fileSystem = DetectorFixtureFileSystem()
+        let watcher = DetectorFixtureWatcher()
+        let suspended = expectation(description: "First observation is awaiting readiness")
+        let firstReady = expectation(description: "Newer observation completes first")
+        let secondReady = expectation(description: "Older observation completes last")
+        let clock = DetectorFirstSleepGateClock { suspended.fulfill() }
+        let values = OSAllocatedUnfairLock(initialState: [DetectedScreenshot]())
+        let detector = makeDetector(fileSystem: fileSystem, watcher: watcher, clock: clock) { screenshot in
+            values.withLock { $0.append(screenshot) }
+            if screenshot.url == newer { firstReady.fulfill() } else { secondReady.fulfill() }
+        }
+        try await detector.start(in: folder)
+        fileSystem.set(shot(inode: 1), at: older)
+        await watcher.emit(.paths([older]))
+        await fulfillment(of: [suspended], timeout: 2)
+        fileSystem.set(shot(inode: 2), at: newer)
+        await watcher.emit(.paths([newer]))
+        await fulfillment(of: [firstReady], timeout: 2)
+        await clock.release()
+        await fulfillment(of: [secondReady], timeout: 2)
+        let captured = values.withLock { $0 }
+        XCTAssertEqual(captured.map(\.observationSequence), [2, 1])
+        XCTAssertEqual(captured.map(\.url), [newer, older])
+        XCTAssertTrue(captured.allSatisfy { $0.observedAt == Date(timeIntervalSince1970: 0.0000001) })
+        await detector.stop()
+    }
+
+    func testBatchTieOrderIsStableAndSequenceResetsOnRestart() async throws {
+        let a = folder.appendingPathComponent("a.png")
+        let z = folder.appendingPathComponent("z.png")
+        let fileSystem = DetectorFixtureFileSystem()
+        let watcher = DetectorFixtureWatcher()
+        let firstBatch = expectation(description: "Both batch observations emit")
+        firstBatch.expectedFulfillmentCount = 2
+        let restarted = expectation(description: "Restarted observation emits")
+        let values = OSAllocatedUnfairLock(initialState: [DetectedScreenshot]())
+        let detector = makeDetector(fileSystem: fileSystem, watcher: watcher) { screenshot in
+            values.withLock { $0.append(screenshot) }
+            if screenshot.identity.inode == 3 { restarted.fulfill() } else { firstBatch.fulfill() }
+        }
+        try await detector.start(in: folder)
+        fileSystem.set(shot(inode: 1), at: a)
+        fileSystem.set(shot(inode: 2), at: z)
+        await watcher.emit(.paths([z, a, z, a]))
+        await fulfillment(of: [firstBatch], timeout: 2)
+        let batch = values.withLock { $0.sorted { $0.observationSequence < $1.observationSequence } }
+        XCTAssertEqual(batch.map(\.url), [a, z])
+        XCTAssertEqual(batch.map(\.observationSequence), [1, 2])
+        await detector.stop()
+        fileSystem.remove(a)
+        fileSystem.remove(z)
+        try await detector.start(in: folder)
+        fileSystem.set(shot(inode: 3), at: z)
+        await watcher.emit(.paths([z]))
+        await fulfillment(of: [restarted], timeout: 2)
+        XCTAssertEqual(values.withLock { $0.last?.observationSequence }, 1)
         await detector.stop()
     }
 
@@ -532,5 +595,32 @@ private actor DetectorGateClock: ScreenshotDetectionClock {
         let pending = waiters
         waiters.removeAll()
         for continuation in pending { continuation.resume() }
+    }
+}
+
+/// Only the first readiness delay is held; later observations can finish deterministically first.
+private actor DetectorFirstSleepGateClock: ScreenshotDetectionClock {
+    private let onSuspend: @Sendable () -> Void
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var hasSuspended = false
+    private var elapsed: Duration = .zero
+
+    init(onSuspend: @escaping @Sendable () -> Void) { self.onSuspend = onSuspend }
+    func now() async -> Duration { elapsed }
+    func sleep(for delay: Duration) async throws {
+        try Task.checkCancellation()
+        if !hasSuspended {
+            hasSuspended = true
+            await withCheckedContinuation { value in
+                continuation = value
+                onSuspend()
+            }
+        }
+        try Task.checkCancellation()
+        elapsed += delay
+    }
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
