@@ -14,6 +14,7 @@ struct ScreenshotFileSnapshot: Equatable, Sendable {
     let modifiedNanoseconds: Int64
     let isScreenshot: Bool
     let isCompleteImage: Bool
+    var outputToken: UUID? = nil
 }
 
 protocol ScreenshotFileSystemReading: Sendable {
@@ -71,6 +72,7 @@ struct LocalScreenshotFileSystem: ScreenshotFileSystemReading {
         guard opened.isRegular, initial == opened else { return nil }
 
         let isScreenshot = Self.hasScreenshotMetadata(descriptor: descriptor)
+        let outputToken = try Self.outputToken(descriptor: descriptor)
         // Most directory changes are unrelated files. Only ask ImageIO to read confirmed candidates.
         let isCompleteImage = isScreenshot && Self.isCompleteImage(descriptor: descriptor)
 
@@ -82,7 +84,7 @@ struct LocalScreenshotFileSystem: ScreenshotFileSystemReading {
         return ScreenshotFileSnapshot(
             identity: opened.identity, size: opened.size,
             modifiedNanoseconds: opened.modifiedNanoseconds,
-            isScreenshot: isScreenshot, isCompleteImage: isCompleteImage
+            isScreenshot: isScreenshot, isCompleteImage: isCompleteImage, outputToken: outputToken
         )
     }
 
@@ -100,6 +102,24 @@ struct LocalScreenshotFileSystem: ScreenshotFileSystemReading {
 
     private static func isTransient(_ error: Int32) -> Bool {
         error == ENOENT || error == ENOTDIR
+    }
+
+    private static func outputToken(descriptor: Int32) throws -> UUID? {
+        // UUID text has exactly 36 ASCII bytes. Bound reads independently of untrusted xattr size.
+        var bytes = [UInt8](repeating: 0, count: 36)
+        let count = bytes.withUnsafeMutableBytes { buffer in
+            fgetxattr(descriptor, ScreenshotOutputMarker.attributeName,
+                      buffer.baseAddress, buffer.count, 0, 0)
+        }
+        if count < 0 {
+            let error = errno
+            if error == ENOATTR || error == ENOTSUP || error == ERANGE { return nil }
+            // An unreadable marker must not turn a known output into a fresh screenshot.
+            throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+        }
+        guard count == bytes.count, let string = String(bytes: bytes, encoding: .ascii),
+              let token = UUID(uuidString: string), token.uuidString == string.uppercased() else { return nil }
+        return token
     }
 
     private static func hasScreenshotMetadata(descriptor: Int32) -> Bool {

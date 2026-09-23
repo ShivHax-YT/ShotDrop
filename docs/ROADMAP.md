@@ -15,7 +15,7 @@ M0 validation: Debug build and 9 unit tests pass; app process launched. GUI acce
 
 Detection validation: 51 tests pass, including a real filesystem watcher with synthetic PNG/xattr fixtures, late metadata, deduplication, and cancellation races. The detector service is not started by the app yet. Native system-capture timing and source-folder permission acceptance remain pending.
 
-Organization validation: 89 total tests pass, including naming, metadata/byte verification, collisions, cancellation, tampering, post-publication recovery, and source/destination overlap. Injected EXDEV, ENOSPC, and EACCES preserve originals. Separate physical-volume behavior and real folder-permission acceptance remain unverified; automatic app processing and destination-failure UI are still pending.
+Organization validation (#107 repair): production Debug build and 98 unhosted Core tests pass. Both stage pathname races fail deterministically on the #21 baseline and pass with descriptor-bound clone publication and cleanup. Coverage includes hardlink output substitution, metadata/byte verification, exclusive collisions, cancellation, post-publication recovery, UUID output suppression, and actual clone-call injection of ENOTSUP, EXDEV, ENOSPC, and EACCES. Clone-capable destination filesystems are required; private staging artifacts are retained. Independent QA/review acceptance, separate physical-volume behavior, and real folder-permission acceptance remain pending; automatic app processing and destination-failure UI are still pending.
 ## M2 — UX
 - [ ] Floating thumbnail with drag-out, click-to-open, swipe-to-dismiss
 - [ ] Menu bar recent list (20) with copy/reveal/delete

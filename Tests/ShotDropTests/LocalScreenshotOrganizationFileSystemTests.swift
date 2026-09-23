@@ -8,11 +8,11 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
         try withFixture { fixture in
             let destination = fixture.destination
             let moved = fixture.root.appendingPathComponent("moved-destination", isDirectory: true)
-            let fileSystem = LocalScreenshotOrganizationFileSystem { phase in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
                 if phase == .afterPublish {
                     try FileManager.default.moveItem(at: destination, to: moved)
                 }
-            }
+            })
             let stage = try fileSystem.stageCopy(
                 source: fixture.source, destinationRoot: destination,
                 subdirectories: [], expectedIdentity: nil
@@ -31,15 +31,46 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
     func testCrossDeviceSpaceAndPermissionErrorsPreserveOriginal() throws {
         for code: POSIXErrorCode in [.EXDEV, .ENOSPC, .EACCES] {
             try withFixture { fixture in
-                let fileSystem = LocalScreenshotOrganizationFileSystem { phase in
+                let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
                     if phase == .afterCopy { throw POSIXError(code) }
-                }
+                })
                 XCTAssertThrowsError(try fileSystem.stageCopy(
                     source: fixture.source, destinationRoot: fixture.destination,
                     subdirectories: [], expectedIdentity: nil
                 ))
                 try fixture.assertOriginal()
                 XCTAssertEqual(try entries(fixture.destination), [])
+            }
+        }
+    }
+
+    func testCloneSyscallFailuresPreserveOriginalAndNeverPublish() throws {
+        for code: POSIXErrorCode in [.ENOTSUP, .EXDEV, .ENOSPC, .EACCES] {
+            try withFixture { fixture in
+                let sentinelURL = fixture.destination.appendingPathComponent("unrelated.png")
+                let sentinelBytes = Data("existing user file must survive failed publication".utf8)
+                try sentinelBytes.write(to: sentinelURL)
+                let fileSystem = LocalScreenshotOrganizationFileSystem(clone: { _, _, _ in
+                    errno = code.rawValue
+                    return -1
+                })
+                let stage = try fileSystem.stageCopy(
+                    source: fixture.source, destinationRoot: fixture.destination,
+                    subdirectories: [], expectedIdentity: nil
+                )
+                let stageURL = try Self.stageURL(in: fixture.destination)
+                XCTAssertEqual(try Data(contentsOf: stageURL), fixture.bytes)
+                let error = try XCTUnwrap(failure { try stage.publish(named: "published.png") })
+                XCTAssertEqual(error.code, code == .EACCES ? .permissionDenied : .destinationUnavailable)
+                XCTAssertNil(error.recoverableDestination)
+                XCTAssertFalse(FileManager.default.fileExists(
+                    atPath: fixture.destination.appendingPathComponent("published.png").path
+                ))
+                stage.discard()
+                XCTAssertEqual(try Data(contentsOf: stageURL), Data())
+                XCTAssertEqual(try Data(contentsOf: sentinelURL), sentinelBytes)
+                XCTAssertEqual(try entries(fixture.destination), ["unrelated.png"])
+                try fixture.assertOriginal()
             }
         }
     }
@@ -54,7 +85,8 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 subdirectories: ["2026", "09"], expectedIdentity: identity
             )
             let result = try stage.publish(named: "saved.png")
-            XCTAssertEqual(result.identity, stage.identity)
+            XCTAssertNotEqual(result.identity, stage.identity)
+            XCTAssertEqual(result.outputToken, stage.outputToken)
             XCTAssertNotEqual(result.identity, identity)
             XCTAssertEqual(result.destinationURL, fixture.destination.appendingPathComponent("2026/09/saved.png"))
             XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
@@ -80,7 +112,7 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 try fixture.assertOriginal()
             }
             let published = try stage.publish(named: "available.png")
-            XCTAssertEqual(published.identity, stage.identity)
+            XCTAssertNotEqual(published.identity, stage.identity)
             XCTAssertEqual(try Data(contentsOf: published.destinationURL), fixture.bytes)
             XCTAssertEqual(try Data(contentsOf: existing), sentinel)
             stage.discard()
@@ -201,9 +233,9 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 let unrelated = fixture.destination.appendingPathComponent(".unrelated-hidden-file")
                 let sentinel = Data("must survive cleanup".utf8)
                 try sentinel.write(to: unrelated)
-                let fileSystem = LocalScreenshotOrganizationFileSystem { current in
+                let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { current in
                     if current == phase { throw InjectedFailure.interrupted }
-                }
+                })
                 var stage: (any ScreenshotStagedCopy)?
                 var thrown: Error?
                 do {
@@ -236,9 +268,9 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
         try withFixture { fixture in
             let source = fixture.source
             let changed = Data("source changed while copying".utf8)
-            let fileSystem = LocalScreenshotOrganizationFileSystem { phase in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
                 if phase == .afterCopy { try changed.write(to: source) }
-            }
+            })
             XCTAssertEqual(failure {
                 try fileSystem.stageCopy(source: source, destinationRoot: fixture.destination,
                                          subdirectories: [], expectedIdentity: nil)
@@ -248,17 +280,18 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
         }
     }
 
-    func testDiscardRemovesOnlyItsOwnedHiddenStage() throws {
+    func testDiscardClearsOnlyItsOwnedStageWithoutUnlinkingPaths() throws {
         try withFixture { fixture in
             let unrelated = fixture.destination.appendingPathComponent(".shotdrop-unrelated.stage")
             let sentinel = Data("unrelated hidden contents".utf8)
             try sentinel.write(to: unrelated)
             let stage = try fixture.stage()
-            let stagedEntries = try entries(fixture.destination)
-            XCTAssertEqual(stagedEntries.count, 2)
-            XCTAssertTrue(stagedEntries.allSatisfy { $0.hasPrefix(".") })
+            let stageURL = try Self.stageURL(in: fixture.destination)
+            XCTAssertEqual(try Data(contentsOf: stageURL), fixture.bytes)
             stage.discard()
             stage.discard()
+            XCTAssertTrue(FileManager.default.fileExists(atPath: stageURL.path))
+            XCTAssertEqual(try Data(contentsOf: stageURL), Data())
             XCTAssertEqual(try entries(fixture.destination), [".shotdrop-unrelated.stage"])
             XCTAssertEqual(try Data(contentsOf: unrelated), sentinel)
             try fixture.assertOriginal()
@@ -286,14 +319,11 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
     func testChangedStageBytesCannotBePublished() throws {
         try withFixture { fixture in
             let destination = fixture.destination
-            let fileSystem = LocalScreenshotOrganizationFileSystem { phase in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
                 if phase == .beforeVerification {
-                    let stage = try FileManager.default.contentsOfDirectory(
-                        at: destination, includingPropertiesForKeys: nil
-                    ).first { $0.lastPathComponent.hasPrefix(".shotdrop-") }
-                    try Data("tampered copy".utf8).write(to: XCTUnwrap(stage))
+                    try Data("tampered copy".utf8).write(to: Self.stageURL(in: destination))
                 }
-            }
+            })
             XCTAssertEqual(failure {
                 try fileSystem.stageCopy(source: fixture.source, destinationRoot: destination,
                                          subdirectories: [], expectedIdentity: nil)
@@ -308,14 +338,11 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
             let destination = fixture.destination
             let marker = Data("original attribute".utf8)
             try Self.setAttribute(marker, at: fixture.source)
-            let fileSystem = LocalScreenshotOrganizationFileSystem { phase in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
                 if phase == .beforeVerification {
-                    let stage = try FileManager.default.contentsOfDirectory(
-                        at: destination, includingPropertiesForKeys: nil
-                    ).first { $0.lastPathComponent.hasPrefix(".shotdrop-") }
-                    try Self.setAttribute(Data("changed attribute".utf8), at: XCTUnwrap(stage))
+                    try Self.setAttribute(Data("changed attribute".utf8), at: Self.stageURL(in: destination))
                 }
-            }
+            })
             XCTAssertEqual(failure {
                 try fileSystem.stageCopy(source: fixture.source, destinationRoot: destination,
                                          subdirectories: [], expectedIdentity: nil)
@@ -329,17 +356,116 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
     func testReplacedStagePathIsNotDeletedOrPublished() throws {
         try withFixture { fixture in
             let stage = try fixture.stage()
-            let hiddenName = try XCTUnwrap(entries(fixture.destination).first)
-            let hiddenURL = fixture.destination.appendingPathComponent(hiddenName)
+            let hiddenURL = try Self.stageURL(in: fixture.destination)
             let moved = fixture.root.appendingPathComponent("moved-private-stage")
             try FileManager.default.moveItem(at: hiddenURL, to: moved)
             let replacement = Data("replacement belongs to somebody else".utf8)
             try replacement.write(to: hiddenURL)
             XCTAssertEqual(failure { try stage.publish(named: "output.png") }?.code, .verificationFailed)
+            XCTAssertEqual(try Data(contentsOf: moved), fixture.bytes)
             stage.discard()
             XCTAssertEqual(try Data(contentsOf: hiddenURL), replacement)
-            XCTAssertEqual(try Data(contentsOf: moved), fixture.bytes)
-            XCTAssertEqual(try entries(fixture.destination), [hiddenName])
+            XCTAssertTrue(FileManager.default.fileExists(atPath: moved.path))
+            XCTAssertEqual(try entries(fixture.destination), [])
+            try fixture.assertOriginal()
+        }
+    }
+
+    func testStagePathSwapAfterVerificationPublishesOnlyVerifiedDescriptorBytes() throws {
+        try withFixture { fixture in
+            let parked = fixture.root.appendingPathComponent("parked-stage")
+            let replacement = Data("unrelated replacement must not become the screenshot".utf8)
+            let unrelated = fixture.destination.appendingPathComponent("unrelated.png")
+            let unrelatedBytes = Data("preexisting user screenshot".utf8)
+            try unrelatedBytes.write(to: unrelated)
+            let fileSystem = LocalScreenshotOrganizationFileSystem(race: { point, stageURL in
+                guard point == .afterStageVerificationBeforePublish else { return }
+                try FileManager.default.moveItem(at: stageURL, to: parked)
+                try replacement.write(to: stageURL)
+            })
+            var stage: (any ScreenshotStagedCopy)? = try fileSystem.stageCopy(
+                source: fixture.source, destinationRoot: fixture.destination,
+                subdirectories: [], expectedIdentity: nil
+            )
+            let stageURL = try Self.stageURL(in: fixture.destination)
+            let result = try XCTUnwrap(stage).publish(named: "published.png")
+            XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
+            XCTAssertNotEqual(try Data(contentsOf: result.destinationURL), replacement)
+            XCTAssertEqual(try Data(contentsOf: stageURL), replacement)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: parked.path), "Race hook must execute")
+            XCTAssertEqual(result.identity, try LocalScreenshotFileSystem().identity(at: result.destinationURL))
+            XCTAssertEqual(result.outputToken, stage?.outputToken)
+            XCTAssertNotEqual(result.identity, stage?.identity)
+            stage?.discard()
+            stage?.discard()
+            stage = nil
+            XCTAssertEqual(try Data(contentsOf: stageURL), replacement)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: parked.path))
+            XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
+            XCTAssertEqual(try Data(contentsOf: unrelated), unrelatedBytes)
+            XCTAssertEqual(try entries(fixture.destination), ["published.png", "unrelated.png"])
+            try fixture.assertOriginal()
+        }
+    }
+
+    func testOutputHardLinkToStageAfterCloningIsRejectedAndNeverTruncated() throws {
+        try withFixture { fixture in
+            let output = fixture.destination.appendingPathComponent("published.png")
+            let parkedClone = fixture.root.appendingPathComponent("parked-clone.png")
+            let fileSystem = LocalScreenshotOrganizationFileSystem(race: { point, stageURL in
+                guard point == .afterCloneBeforeOutputOpen else { return }
+                try FileManager.default.moveItem(at: output, to: parkedClone)
+                try FileManager.default.linkItem(at: stageURL, to: output)
+            })
+            var stage: (any ScreenshotStagedCopy)? = try fileSystem.stageCopy(
+                source: fixture.source, destinationRoot: fixture.destination,
+                subdirectories: [], expectedIdentity: nil
+            )
+            let stageURL = try Self.stageURL(in: fixture.destination)
+            let error = try XCTUnwrap(failure { try XCTUnwrap(stage).publish(named: "published.png") })
+            XCTAssertEqual(error.code, .verificationFailed)
+            XCTAssertNil(error.recoverableDestination, "The substituted hard link must not become a verified receipt")
+            XCTAssertEqual(try LocalScreenshotFileSystem().identity(at: output), stage?.identity)
+            XCTAssertEqual(try Data(contentsOf: output), fixture.bytes)
+            XCTAssertEqual(try Data(contentsOf: parkedClone), fixture.bytes)
+            stage?.discard()
+            stage?.discard()
+            stage = nil
+            XCTAssertEqual(try Data(contentsOf: output), fixture.bytes)
+            XCTAssertEqual(try Data(contentsOf: stageURL), fixture.bytes)
+            XCTAssertEqual(try Data(contentsOf: parkedClone), fixture.bytes)
+            try fixture.assertOriginal()
+        }
+    }
+
+    func testStagePathSwapAfterCleanupIdentityCheckNeverUnlinksReplacement() throws {
+        try withFixture { fixture in
+            let parked = fixture.root.appendingPathComponent("parked-stage")
+            let replacement = Data("unrelated file arriving at the last cleanup boundary".utf8)
+            let unrelated = fixture.destination.appendingPathComponent("unrelated.png")
+            let unrelatedBytes = Data("preexisting user screenshot".utf8)
+            try unrelatedBytes.write(to: unrelated)
+            let fileSystem = LocalScreenshotOrganizationFileSystem(race: { point, stageURL in
+                guard point == .afterStageIdentityCheckBeforeCleanup else { return }
+                try FileManager.default.moveItem(at: stageURL, to: parked)
+                try replacement.write(to: stageURL)
+            })
+            var stage: (any ScreenshotStagedCopy)? = try fileSystem.stageCopy(
+                source: fixture.source, destinationRoot: fixture.destination,
+                subdirectories: [], expectedIdentity: nil
+            )
+            let stageURL = try Self.stageURL(in: fixture.destination)
+            XCTAssertEqual(try Data(contentsOf: stageURL), fixture.bytes)
+            stage?.discard()
+            stage?.discard()
+            stage = nil
+            XCTAssertEqual(try Data(contentsOf: stageURL), replacement)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: parked.path), "Race hook must execute")
+            XCTAssertEqual(try Data(contentsOf: unrelated), unrelatedBytes)
+            XCTAssertEqual(try entries(fixture.destination), ["unrelated.png"])
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: fixture.destination.appendingPathComponent("published.png").path
+            ))
             try fixture.assertOriginal()
         }
     }
@@ -361,7 +487,20 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
     }
 
     private func entries(_ directory: URL) throws -> [String] {
-        try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { url in
+                var directory: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &directory)
+                return !(exists && directory.boolValue && url.lastPathComponent.hasPrefix(".shotdrop-staging-"))
+            }
+            .map(\.lastPathComponent).sorted()
+    }
+
+    private static func stageURL(in directory: URL) throws -> URL {
+        let stageDirectory = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ).first { $0.lastPathComponent.hasPrefix(".shotdrop-staging-") })
+        return stageDirectory.appendingPathComponent("screenshot.stage")
     }
 
     private func withFixture(_ body: (Fixture) throws -> Void) throws {

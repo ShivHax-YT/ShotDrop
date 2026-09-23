@@ -14,6 +14,7 @@ struct ScreenshotOrganizationResult: Sendable {
     let sourceURL: URL
     let destinationURL: URL
     let destinationIdentity: ScreenshotFileIdentity
+    let outputToken: UUID
     /// Cleanup of originals is a separate, future opt-in feature.
     let sourceWasRemoved = false
 }
@@ -34,7 +35,7 @@ actor ScreenshotOrganizer {
 
     func organize(
         _ request: ScreenshotOrganizationRequest,
-        beforePublishing: @Sendable (ScreenshotFileIdentity) async throws -> Void = { _ in }
+        beforePublishing: @Sendable (UUID) async throws -> Void = { _ in }
     ) async throws -> ScreenshotOrganizationResult {
         try Task.checkCancellation()
         let plan = try ScreenshotNaming.plan(
@@ -51,9 +52,9 @@ actor ScreenshotOrganizer {
         )
         defer { staged.discard() }
 
-        // Register our output identity before any visible filename can trigger detection.
-        // This is essential when the chosen destination is also the screenshot source.
-        try await beforePublishing(staged.identity)
+        // Cloning creates a new inode. Register the marker that travels with the copy
+        // before any visible filename can trigger detection in the source folder.
+        try await beforePublishing(staged.outputToken)
         try Task.checkCancellation()
 
         for index in 0..<collisionLimit {
@@ -64,7 +65,8 @@ actor ScreenshotOrganizer {
                 return ScreenshotOrganizationResult(
                     sourceURL: request.sourceURL,
                     destinationURL: copy.destinationURL,
-                    destinationIdentity: copy.identity
+                    destinationIdentity: copy.identity,
+                    outputToken: copy.outputToken
                 )
             } catch let error as ScreenshotCopyFailure where error.code == .collision {
                 continue

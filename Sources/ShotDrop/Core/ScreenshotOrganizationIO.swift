@@ -3,6 +3,12 @@ import Foundation
 struct VerifiedScreenshotCopy: Sendable {
     let destinationURL: URL
     let identity: ScreenshotFileIdentity
+    let outputToken: UUID
+}
+
+/// Copied with the staged file so output suppression survives cloning to a new inode.
+enum ScreenshotOutputMarker {
+    static let attributeName = "com.macfleet.shotdrop.output-token"
 }
 
 struct ScreenshotCopyFailure: Error, LocalizedError, Sendable {
@@ -19,6 +25,7 @@ struct ScreenshotCopyFailure: Error, LocalizedError, Sendable {
 /// A staged transaction is confined to the organizer actor. Never removes its source.
 protocol ScreenshotStagedCopy: AnyObject {
     var identity: ScreenshotFileIdentity { get }
+    var outputToken: UUID { get }
     func publish(named filename: String) throws -> VerifiedScreenshotCopy
     func discard()
 }
@@ -35,4 +42,11 @@ protocol ScreenshotOrganizationFileSystem: Sendable {
 /// Narrow fault-injection boundary for deterministic data-preservation tests.
 enum ScreenshotCopyPhase: Sendable, CaseIterable {
     case beforeCopy, afterCopy, beforeVerification, beforePublish, afterPublish
+}
+
+/// Runs at the formerly vulnerable gap between a pathname check and its mutation.
+enum ScreenshotCopyRacePoint: Sendable, CaseIterable {
+    case afterStageVerificationBeforePublish
+    case afterCloneBeforeOutputOpen
+    case afterStageIdentityCheckBeforeCleanup
 }

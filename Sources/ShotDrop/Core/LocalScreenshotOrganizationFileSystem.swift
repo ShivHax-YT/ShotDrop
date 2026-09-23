@@ -2,12 +2,22 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// Descriptor-relative, source-preserving publication. The transaction is actor confined.
+/// Descriptor-bound, source-preserving publication. Transactions are actor confined.
 struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
     private let fault: @Sendable (ScreenshotCopyPhase) throws -> Void
+    private let race: @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void
+    private let clone: @Sendable (Int32, Int32, String) -> Int32
 
-    init(fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void = { _ in }) {
+    init(
+        fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void = { _ in },
+        race: @escaping @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void = { _, _ in },
+        clone: @escaping @Sendable (Int32, Int32, String) -> Int32 = { sourceFD, directoryFD, name in
+            fclonefileat(sourceFD, directoryFD, name, UInt32(CLONE_ACL))
+        }
+    ) {
         self.fault = fault
+        self.race = race
+        self.clone = clone
     }
 
     func stageCopy(
@@ -49,14 +59,22 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
             directoryURL.appendPathComponent(component, isDirectory: true)
             directories.append((directoryURL, try CopyFileState.read(directoryFD).identity))
         }
-        let stageName = ".shotdrop-\(UUID().uuidString).stage"
-        let stageFD = openat(directoryFD, stageName, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        let privateName = ".shotdrop-staging-\(UUID().uuidString)"
+        guard mkdirat(directoryFD, privateName, 0o700) == 0 else {
+            throw posixCopyFailure(.destinationUnavailable, "Create private screenshot staging directory")
+        }
+        let privateFD = openat(directoryFD, privateName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard privateFD >= 0 else { throw posixCopyFailure(.destinationUnavailable, "Open private screenshot staging directory") }
+        defer { close(privateFD) }
+        let stageName = "screenshot.stage"
+        let stageFD = openat(privateFD, stageName, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard stageFD >= 0 else { throw posixCopyFailure(.destinationUnavailable, "Create screenshot stage") }
-        // Ownership transfers immediately, so every throwing path closes and discards our stage.
+        // Never remove an entry by pathname, even on construction failure.
         let staged = LocalStagedScreenshotCopy(
             source: source, sourceFD: sourceFD, initial: initial,
             directory: directoryURL, directoryFD: directoryFD, directories: directories,
-            stageName: stageName, stageFD: stageFD, fault: fault
+            stageURL: directoryURL.appendingPathComponent(privateName).appendingPathComponent(stageName),
+            stageFD: stageFD, fault: fault, race: race, clone: clone
         )
         ownsSource = false
         ownsDirectory = false
@@ -72,29 +90,37 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     private let directory: URL
     private let directoryFD: Int32
     private let directories: [(URL, ScreenshotFileIdentity)]
-    private let stageName: String
+    private let stageURL: URL
     private let stageFD: Int32
     private let fault: @Sendable (ScreenshotCopyPhase) throws -> Void
+    private let race: @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void
+    private let clone: @Sendable (Int32, Int32, String) -> Int32
     private var stageOwned = true
     private var publishedURL: URL?
+    private var outputFD: Int32 = -1
+    private var outputIdentity: ScreenshotFileIdentity?
     private var digest = Data()
     private var attributes: [String: Data] = [:]
     private(set) var identity: ScreenshotFileIdentity
+    let outputToken = UUID()
 
     init(source: URL, sourceFD: Int32, initial: CopyFileState,
          directory: URL, directoryFD: Int32, directories: [(URL, ScreenshotFileIdentity)],
-         stageName: String, stageFD: Int32,
-         fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void) {
+         stageURL: URL, stageFD: Int32,
+         fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void,
+         race: @escaping @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void,
+         clone: @escaping @Sendable (Int32, Int32, String) -> Int32) {
         self.source = source
         self.sourceFD = sourceFD
         self.initial = initial
         self.directory = directory
         self.directoryFD = directoryFD
         self.directories = directories
-        self.stageName = stageName
+        self.stageURL = stageURL
         self.stageFD = stageFD
         self.fault = fault
-        // fstat on our newly opened descriptor cannot ordinarily fail; prepare verifies it.
+        self.race = race
+        self.clone = clone
         var info = stat()
         _ = fstat(stageFD, &info)
         identity = CopyFileState(info).identity
@@ -102,6 +128,7 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
 
     deinit {
         discard()
+        if outputFD >= 0 { close(outputFD) }
         close(stageFD)
         close(directoryFD)
         close(sourceFD)
@@ -111,21 +138,28 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         try fault(.beforeCopy)
         try verifySource()
         try verifyDirectories()
-        attributes = try copyAttributes(sourceFD)
+        let sourceAttributes = try copyAttributes(sourceFD)
         guard fcopyfile(sourceFD, stageFD, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 else {
             throw posixCopyFailure(.ioFailure, "Copy screenshot data and metadata")
         }
+        let marker = Data(outputToken.uuidString.utf8)
+        let markerResult = marker.withUnsafeBytes {
+            fsetxattr(stageFD, ScreenshotOutputMarker.attributeName, $0.baseAddress, $0.count, 0, 0)
+        }
+        guard markerResult == 0 else { throw posixCopyFailure(.ioFailure, "Mark screenshot output") }
+        attributes = sourceAttributes
+        attributes[ScreenshotOutputMarker.attributeName] = Data(SHA256.hash(data: marker))
         identity = try CopyFileState.read(stageFD).identity
         try fault(.afterCopy)
         try fault(.beforeVerification)
         try verifySource()
         digest = try copyDigest(sourceFD)
-        try verifyStageContents()
+        try verifyContents(stageFD)
         try verifySource()
-        guard attributes == (try copyAttributes(sourceFD)) else {
+        guard sourceAttributes == (try copyAttributes(sourceFD)) else {
             throw copyFailure(.sourceChanged, "Screenshot metadata changed while copying.")
         }
-        try verifyStagePath(stageName)
+        try verifyStagePath()
         try verifyDirectories()
         guard fsync(stageFD) == 0 else { throw posixCopyFailure(.ioFailure, "Flush screenshot stage") }
     }
@@ -138,7 +172,6 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         do {
             try Task.checkCancellation()
             try fault(.beforePublish)
-            // Skip known collisions cheaply. Exclusive rename below still arbitrates races.
             var existing = stat()
             if fstatat(directoryFD, filename, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
                 throw copyFailure(.collision, "Destination filename already exists.")
@@ -146,22 +179,36 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
             if errno != ENOENT { throw posixCopyFailure(.destinationUnavailable, "Inspect destination filename") }
             try verifySource()
             try verifyDirectories()
-            try verifyStagePath(stageName)
-            try verifyStageContents()
-            guard renameatx_np(directoryFD, stageName, directoryFD, filename, UInt32(RENAME_EXCL)) == 0 else {
+            try verifyStagePath()
+            try verifyContents(stageFD)
+            try race(.afterStageVerificationBeforePublish, stageURL)
+            // Reads the pinned stage inode, never its mutable pathname. Atomic and exclusive.
+            // Unsupported filesystems fail safely; a pathname-rename fallback is not safe.
+            guard clone(stageFD, directoryFD, filename) == 0 else {
                 if errno == EEXIST { throw copyFailure(.collision, "Destination filename already exists.") }
-                throw posixCopyFailure(.destinationUnavailable, "Publish screenshot")
+                throw posixCopyFailure(.destinationUnavailable, "Clone screenshot into destination (clone support required)")
             }
-            stageOwned = false
             let output = directory.appendingPathComponent(filename)
             publishedURL = output
+            try race(.afterCloneBeforeOutputOpen, stageURL)
+            outputFD = openat(directoryFD, filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+            guard outputFD >= 0 else { throw posixCopyFailure(.verificationFailed, "Open published screenshot") }
+            let outputState = try CopyFileState.read(outputFD)
+            guard outputState.regular else { throw copyFailure(.verificationFailed, "Published screenshot is not a regular file.") }
+            guard outputState.identity.device != identity.device || outputState.identity.inode != identity.inode else {
+                throw copyFailure(.verificationFailed, "Published screenshot was replaced with a link to its stage.")
+            }
+            try verifyContents(outputFD)
+            outputIdentity = outputState.identity
             try fault(.afterPublish)
-            try verifyStagePath(filename)
             try verifyDirectories()
-            try verifyStageContents()
+            try verifyContents(outputFD)
             try verifySource()
+            guard recoveryURL(preferred: output) == output else {
+                throw copyFailure(.verificationFailed, "Published screenshot path changed during verification.")
+            }
             guard fsync(directoryFD) == 0 else { throw posixCopyFailure(.ioFailure, "Flush destination directory") }
-            return VerifiedScreenshotCopy(destinationURL: output, identity: identity)
+            return VerifiedScreenshotCopy(destinationURL: output, identity: outputState.identity, outputToken: outputToken)
         } catch {
             if let publishedURL {
                 var failure = (error as? ScreenshotCopyFailure)
@@ -175,29 +222,37 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
 
     func discard() {
         guard stageOwned else { return }
-        // Only unlink the hidden name if it still denotes the exact inode we created.
-        var pathInfo = stat()
-        var descriptorInfo = stat()
-        if fstat(stageFD, &descriptorInfo) == 0,
-           fstatat(directoryFD, stageName, &pathInfo, AT_SYMLINK_NOFOLLOW) == 0,
-           pathInfo.st_dev == descriptorInfo.st_dev, pathInfo.st_ino == descriptorInfo.st_ino,
-           (pathInfo.st_mode & S_IFMT) == S_IFREG {
-            _ = unlinkat(directoryFD, stageName, 0)
-        }
         stageOwned = false
+        // This check is diagnostic only. No following operation resolves the pathname.
+        if (try? verifyStagePath()) != nil {
+            try? race(.afterStageIdentityCheckBeforeCleanup, stageURL)
+        }
+        // Reclaim only the inode pinned by our descriptor. Keep empty private artifacts:
+        // Darwin offers no inode-conditional unlink, and another same-user process can
+        // replace even an entry in a 0700 directory. Never risk deleting that replacement.
+        // A substituted output can alias the stage inode. Preserve it even when publication
+        // failed verification, rather than emptying an externally visible hard link.
+        if let outputIdentity,
+           outputIdentity.device == identity.device, outputIdentity.inode == identity.inode { return }
+        if outputFD >= 0 {
+            guard let outputState = try? CopyFileState.read(outputFD),
+                  let stageState = try? CopyFileState.read(stageFD),
+                  outputState.identity.device != stageState.identity.device
+                    || outputState.identity.inode != stageState.identity.inode else { return }
+        }
+        _ = ftruncate(stageFD, 0)
     }
 
     private func recoveryURL(preferred: URL) -> URL? {
+        guard let outputIdentity, outputFD >= 0 else { return nil }
         func stillIdentifiesOutput(_ url: URL) -> Bool {
             var info = stat()
             return lstat(url.path, &info) == 0 && CopyFileState(info).regular
-                && CopyFileState(info).identity == identity
+                && CopyFileState(info).identity == outputIdentity
         }
         if stillIdentifiesOutput(preferred) { return preferred }
-        // A caller may have moved the directory after publication. Do not return a stale
-        // URL that now names nothing (or an unrelated replacement file).
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        let result = buffer.withUnsafeMutableBytes { fcntl(stageFD, F_GETPATH, $0.baseAddress!) }
+        let result = buffer.withUnsafeMutableBytes { fcntl(outputFD, F_GETPATH, $0.baseAddress!) }
         guard result == 0 else { return nil }
         let current = URL(fileURLWithPath: String(cString: buffer))
         return stillIdentifiesOutput(current) ? current : nil
@@ -223,16 +278,16 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         }
     }
 
-    private func verifyStagePath(_ name: String) throws {
+    private func verifyStagePath() throws {
         var info = stat()
-        guard fstatat(directoryFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+        guard lstat(stageURL.path, &info) == 0,
               CopyFileState(info).regular, CopyFileState(info).identity == identity else {
-            throw copyFailure(.verificationFailed, "Screenshot destination identity changed.")
+            throw copyFailure(.verificationFailed, "Screenshot stage identity changed.")
         }
     }
 
-    private func verifyStageContents() throws {
-        guard try copyDigest(stageFD) == digest, try copyAttributes(stageFD) == attributes else {
+    private func verifyContents(_ descriptor: Int32) throws {
+        guard try copyDigest(descriptor) == digest, try copyAttributes(descriptor) == attributes else {
             throw copyFailure(.verificationFailed, "Screenshot bytes or metadata did not match the source.")
         }
     }

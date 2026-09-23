@@ -87,6 +87,43 @@ final class ScreenshotFileSystemTests: XCTestCase {
         }
     }
 
+    func testOutputTokenIsReadFromScreenshotAndSurvivesRename() throws {
+        try withDirectory { directory in
+            let file = directory.appendingPathComponent("output.png")
+            let token = UUID()
+            try writeImage(to: file)
+            try setMetadata(true, at: file)
+            try setOutputMarker(Data(token.uuidString.utf8), at: file)
+            let reader = LocalScreenshotFileSystem()
+            let snapshot = try XCTUnwrap(reader.snapshot(at: file))
+            XCTAssertEqual(snapshot.outputToken, token)
+            XCTAssertTrue(snapshot.isScreenshot)
+            XCTAssertTrue(snapshot.isCompleteImage)
+            let renamed = directory.appendingPathComponent("renamed.png")
+            try FileManager.default.moveItem(at: file, to: renamed)
+            XCTAssertEqual(try reader.snapshot(at: renamed)?.outputToken, token)
+        }
+    }
+
+    func testMissingMalformedAndOversizeOutputMarkersDoNotSuppressScreenshotMetadata() throws {
+        try withDirectory { directory in
+            let file = directory.appendingPathComponent("shot.png")
+            try writeImage(to: file)
+            try setMetadata(true, at: file)
+            let reader = LocalScreenshotFileSystem()
+            XCTAssertNil(try reader.snapshot(at: file)?.outputToken)
+            for marker in [Data(), Data("invalid".utf8), Data(repeating: 65, count: 36),
+                           Data(repeating: 255, count: 36), Data(repeating: 65, count: 8_192),
+                           Data((UUID().uuidString + "\0").utf8)] {
+                try setOutputMarker(marker, at: file)
+                let snapshot = try XCTUnwrap(reader.snapshot(at: file))
+                XCTAssertNil(snapshot.outputToken)
+                XCTAssertTrue(snapshot.isScreenshot)
+                XCTAssertTrue(snapshot.isCompleteImage)
+            }
+        }
+    }
+
     func testSymlinksDirectoriesAndMissingFilesAreNotCandidates() throws {
         try withDirectory { directory in
             let file = directory.appendingPathComponent("shot.png")
@@ -160,6 +197,13 @@ final class ScreenshotFileSystemTests: XCTestCase {
             data.withUnsafeBytes { bytes in
                 setxattr(path!, "com.apple.metadata:kMDItemIsScreenCapture", bytes.baseAddress, bytes.count, 0, 0)
             }
+        }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private func setOutputMarker(_ data: Data, at url: URL) throws {
+        let result = data.withUnsafeBytes { bytes in
+            setxattr(url.path, ScreenshotOutputMarker.attributeName, bytes.baseAddress, bytes.count, 0, 0)
         }
         guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }

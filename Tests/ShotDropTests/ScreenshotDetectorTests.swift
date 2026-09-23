@@ -79,6 +79,77 @@ final class ScreenshotDetectorTests: XCTestCase {
         await detector.stop()
     }
 
+    func testRegisteredOutputTokenSuppressesClonedAndRenamedInodes() async throws {
+        let output = folder.appendingPathComponent("cloned.png")
+        let renamed = folder.appendingPathComponent("renamed-clone.png")
+        let unknown = folder.appendingPathComponent("unknown-token.png")
+        let fileSystem = DetectorFixtureFileSystem()
+        let watcher = DetectorFixtureWatcher()
+        let unexpected = expectation(description: "Registered output token never emits")
+        unexpected.isInverted = true
+        let fresh = expectation(description: "Unknown token remains a fresh screenshot")
+        let token = UUID()
+        let detector = makeDetector(fileSystem: fileSystem, watcher: watcher) { screenshot in
+            if screenshot.url == unknown { fresh.fulfill() } else { unexpected.fulfill() }
+        }
+        try await detector.start(in: folder)
+        await detector.ignoreOutput(token: token)
+        fileSystem.set(shot(inode: 2, outputToken: token), at: output)
+        fileSystem.set(shot(inode: 3, outputToken: token), at: renamed)
+        fileSystem.set(shot(inode: 4, outputToken: UUID()), at: unknown)
+        await watcher.emit(.paths([output, renamed, unknown]))
+        await watcher.emit(.rescanRequired)
+        await fulfillment(of: [fresh], timeout: 2)
+        await fulfillment(of: [unexpected], timeout: 0.1)
+        XCTAssertGreaterThanOrEqual(fileSystem.snapshotReadCount, 6)
+        await detector.stop()
+    }
+
+    func testOutputTokenRegisteredDuringPendingReadinessSuppressesRenamedOutput() async throws {
+        let output = folder.appendingPathComponent("pending-clone.png")
+        let renamed = folder.appendingPathComponent("renamed-pending-clone.png")
+        let token = UUID()
+        let snapshot = shot(inode: 12, outputToken: token)
+        let fileSystem = DetectorFixtureFileSystem()
+        let watcher = DetectorFixtureWatcher()
+        let suspended = expectation(description: "Output readiness is pending")
+        let unexpected = expectation(description: "Renamed output never emits")
+        unexpected.isInverted = true
+        let clock = DetectorGateClock { suspended.fulfill() }
+        let detector = makeDetector(fileSystem: fileSystem, watcher: watcher, clock: clock) { _ in
+            unexpected.fulfill()
+        }
+        try await detector.start(in: folder)
+        fileSystem.set(snapshot, at: output)
+        await watcher.emit(.paths([output]))
+        await fulfillment(of: [suspended], timeout: 2)
+        await detector.ignoreOutput(token: token)
+        fileSystem.remove(output)
+        fileSystem.set(snapshot, at: renamed)
+        await clock.releaseAll()
+        await watcher.emit(.paths([renamed]))
+        await fulfillment(of: [unexpected], timeout: 0.1)
+        XCTAssertGreaterThanOrEqual(fileSystem.snapshotReadCount, 3)
+        await detector.stop()
+    }
+
+    func testStopClearsRegisteredOutputTokens() async throws {
+        let url = folder.appendingPathComponent("new-session.png")
+        let token = UUID()
+        let fileSystem = DetectorFixtureFileSystem()
+        let watcher = DetectorFixtureWatcher()
+        let emitted = expectation(description: "Earlier session token does not suppress new screenshot")
+        let detector = makeDetector(fileSystem: fileSystem, watcher: watcher) { _ in emitted.fulfill() }
+        try await detector.start(in: folder)
+        await detector.ignoreOutput(token: token)
+        await detector.stop()
+        try await detector.start(in: folder)
+        fileSystem.set(shot(inode: 14, outputToken: token), at: url)
+        await watcher.emit(.paths([url]))
+        await fulfillment(of: [emitted], timeout: 2)
+        await detector.stop()
+    }
+
     func testLateCallbackAfterStopIsSuppressed() async throws {
         let url = folder.appendingPathComponent("late.png")
         let fileSystem = DetectorFixtureFileSystem()
@@ -310,10 +381,11 @@ final class ScreenshotDetectorTests: XCTestCase {
         )
     }
 
-    private func shot(inode: UInt64, birth: Int64 = 200) -> ScreenshotFileSnapshot {
+    private func shot(inode: UInt64, birth: Int64 = 200, outputToken: UUID? = nil) -> ScreenshotFileSnapshot {
         ScreenshotFileSnapshot(
             identity: ScreenshotFileIdentity(device: 1, inode: inode, birthNanoseconds: birth),
-            size: 100, modifiedNanoseconds: 1, isScreenshot: true, isCompleteImage: true
+            size: 100, modifiedNanoseconds: 1, isScreenshot: true, isCompleteImage: true,
+            outputToken: outputToken
         )
     }
 

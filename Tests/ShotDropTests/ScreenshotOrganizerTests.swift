@@ -37,7 +37,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
     }
 
-    func testExhaustedCollisionBudgetPreservesSourceAndRemovesOnlyStage() async throws {
+    func testExhaustedCollisionBudgetPreservesSourceAndExistingFiles() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         try FileManager.default.createDirectory(at: fixture.destination, withIntermediateDirectories: true)
@@ -51,7 +51,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
             XCTAssertEqual(failure.code, .collision)
         }
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
-        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: fixture.destination.path)),
+        XCTAssertEqual(Set(try visibleEntries(in: fixture.destination)),
                        ["capture.png", "capture (2).png"])
     }
 
@@ -66,20 +66,31 @@ final class ScreenshotOrganizerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
     }
 
-    func testPublicationHookRunsBeforeVisibleOutputAndGetsFinalIdentity() async throws {
+    func testPublicationHookRegistersTokenBeforeVisibleOutputAndReturnsClonedIdentity() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
-        let receipt = OSAllocatedUnfairLock<ScreenshotFileIdentity?>(initialState: nil)
+        let receipt = OSAllocatedUnfairLock<(token: UUID?, stageInode: UInt64?)>(initialState: (nil, nil))
         let destination = fixture.destination
-        let result = try await ScreenshotOrganizer().organize(fixture.request()) { identity in
-            receipt.withLock { $0 = identity }
+        let result = try await ScreenshotOrganizer().organize(fixture.request()) { token in
             let names = try FileManager.default.contentsOfDirectory(atPath: destination.path)
-            XCTAssertTrue(names.allSatisfy { $0.hasPrefix(".") })
+            XCTAssertEqual(names.count, 1)
+            XCTAssertTrue(names.allSatisfy { $0.hasPrefix(".shotdrop-staging-") })
+            let directory = destination.appendingPathComponent(try XCTUnwrap(names.first))
+            let stages = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            XCTAssertEqual(stages.count, 1)
+            let stage = try XCTUnwrap(stages.first)
+            let attributes = try FileManager.default.attributesOfItem(atPath: stage.path)
+            let inode = try XCTUnwrap(attributes[.systemFileNumber] as? NSNumber).uint64Value
+            receipt.withLock { $0 = (token, inode) }
         }
-        XCTAssertEqual(receipt.withLock { $0 }, result.destinationIdentity)
+        XCTAssertEqual(receipt.withLock { $0.token }, result.outputToken)
+        XCTAssertNotEqual(receipt.withLock { $0.stageInode }, result.destinationIdentity.inode)
+        XCTAssertEqual(try LocalScreenshotFileSystem().identity(at: result.destinationURL), result.destinationIdentity)
+        let snapshot = try XCTUnwrap(LocalScreenshotFileSystem().snapshot(at: result.destinationURL))
+        XCTAssertEqual(snapshot.outputToken, result.outputToken)
     }
 
-    func testCancelledPublicationHookCleansStageAndLeavesOriginal() async throws {
+    func testCancelledPublicationHookLeavesOriginalAndNoVisibleOutput() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         do {
@@ -89,7 +100,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
             XCTFail("Cancellation must propagate")
         } catch is CancellationError {}
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.destination.path), [])
+        XCTAssertEqual(try visibleEntries(in: fixture.destination), [])
     }
 
     func testAlreadyCancelledOperationDoesNotCreateDestination() async throws {
@@ -122,12 +133,13 @@ final class ScreenshotOrganizerTests: XCTestCase {
             namingContext: base.namingContext
         )
         do {
-            let result = try await ScreenshotOrganizer().organize(request) { identity in
-                await detector.ignoreOutput(identity)
+            let result = try await ScreenshotOrganizer().organize(request) { token in
+                await detector.ignoreOutput(token: token)
             }
             let snapshot = try XCTUnwrap(LocalScreenshotFileSystem().snapshot(at: result.destinationURL))
             XCTAssertTrue(snapshot.isScreenshot)
             XCTAssertTrue(snapshot.isCompleteImage)
+            XCTAssertEqual(snapshot.outputToken, result.outputToken)
             await fulfillment(of: [unexpected], timeout: 0.4)
             await detector.stop()
             XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
@@ -143,6 +155,11 @@ final class ScreenshotOrganizerTests: XCTestCase {
             setxattr(url.path, "com.apple.metadata:kMDItemIsScreenCapture", $0.baseAddress, $0.count, 0, 0)
         }
         guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private func visibleEntries(in directory: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { !$0.hasPrefix(".shotdrop-staging-") }
     }
 }
 

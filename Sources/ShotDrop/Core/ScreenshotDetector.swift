@@ -41,6 +41,7 @@ actor ScreenshotDetector {
     private var metadata: ScreenshotMetadataReconciler?
     private var historical: Set<ScreenshotFileIdentity> = []
     private var emitted: Set<ScreenshotFileIdentity> = []
+    private var outputTokens: Set<UUID> = []
     private var queued: [URL] = []
     private var queuedSet: Set<URL> = []
     private var pending: [URL: PendingCheck] = [:]
@@ -168,6 +169,7 @@ actor ScreenshotDetector {
         startupEvents.removeAll()
         historical.removeAll()
         emitted.removeAll()
+        outputTokens.removeAll()
         directory = nil
         let oldMetadata = metadata
         metadata = nil
@@ -181,6 +183,11 @@ actor ScreenshotDetector {
     /// The organizer exposes this identity before publication to prevent feedback loops.
     func ignoreOutput(_ identity: ScreenshotFileIdentity) {
         emitted.insert(identity)
+    }
+
+    /// Register provenance before publication; cloned outputs have a new file identity.
+    func ignoreOutput(token: UUID) {
+        outputTokens.insert(token)
     }
 
     private func accepts(_ url: URL) -> Bool {
@@ -269,6 +276,10 @@ actor ScreenshotDetector {
             return
         }
         let identity = result.snapshot.identity
+        if let token = result.snapshot.outputToken, outputTokens.contains(token) {
+            emitted.insert(identity)
+            return
+        }
         guard !historical.contains(identity), !emitted.contains(identity),
               let current = try? fileSystem.identity(at: url), current == identity else { return }
         emitted.insert(identity)
