@@ -225,38 +225,32 @@ final class RecentMenuController {
               let reference = record.savedReference ?? record.sourceReference else { return }
         let requestGeneration = generation
         rowTasks[id] = Task {
-            let result = await resolveRecent(reference)
+            let result: RecentRowValidation
+            do { result = try await previews.validateRow(captureID: id, reference: reference) }
+            catch { return } // Cancellation/queue pressure does not authorize a file action.
             guard !Task.isCancelled, generation == requestGeneration,
                   visibleRows.contains(id), records[id]?.revision == record.revision else { return }
             switch result {
             case .unavailable(let issue): markUnavailable(id, issue: issue)
-            case .available(let file):
-                let key = RecentPreviewKey(captureID: id, reference: reference)
+            case .available(let image, let refreshedReference):
                 textCopy.clearUnavailable(id)
-                do {
-                    let image = try await previews.thumbnail(for: key) {
-                        guard case .available(let verified) = RecentFileResolver().resolve(reference) else {
-                            throw RecentPreviewError.decodeFailed
-                        }
-                        return verified.validatedData
-                    }
-                    guard !Task.isCancelled, generation == requestGeneration,
-                          visibleRows.contains(id), records[id]?.revision == record.revision else { return }
-                    updateRow(id) { row in
-                        RecentMenuRow(id: row.id, displayName: row.displayName,
-                            detectedAt: row.detectedAt, detail: row.detail,
-                            availability: row.availability, savedPath: row.savedPath,
-                            sourcePath: row.sourcePath, previewImage: image,
-                            copyConfirmation: row.copyConfirmation)
-                    }
-                } catch { /* Preview failure leaves the verified row usable. */ }
-                if let refreshed = file.refreshedReference {
+                updateRow(id) { row in
+                    RecentMenuRow(id: row.id, displayName: row.displayName,
+                        detectedAt: row.detectedAt, detail: row.detail,
+                        availability: row.availability, savedPath: row.savedPath,
+                        sourcePath: row.sourcePath, previewImage: image,
+                        copyConfirmation: row.copyConfirmation)
+                }
+                if let refreshed = refreshedReference {
                     let change = reference.role == .savedCopy
                         ? RecentHistoryChange(savedReference: refreshed)
                         : RecentHistoryChange(sourceReference: refreshed)
                     if let updated = try? await history.update(captureID: id,
                         expectedRevision: record.revision, change: change),
-                        generation == requestGeneration { records[id] = updated }
+                        !Task.isCancelled, generation == requestGeneration,
+                        visibleRows.contains(id), records[id]?.revision == record.revision {
+                        records[id] = updated
+                    }
                 }
             }
         }

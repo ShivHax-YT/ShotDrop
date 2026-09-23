@@ -128,6 +128,8 @@ struct RecentFileResolver {
 
     private let resolveBookmark: BookmarkResolution
     private let createBookmark: BookmarkCreation
+    private let onRead: (@Sendable (Int) -> Void)?
+    private let onHash: (@Sendable (Int) -> Void)?
 
     init(resolveBookmark: @escaping BookmarkResolution = { data in
         var stale = false
@@ -136,9 +138,11 @@ struct RecentFileResolver {
         return (url, stale)
     }, createBookmark: @escaping BookmarkCreation = { url in
         try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-    }) {
+    }, onRead: (@Sendable (Int) -> Void)? = nil, onHash: (@Sendable (Int) -> Void)? = nil) {
         self.resolveBookmark = resolveBookmark
         self.createBookmark = createBookmark
+        self.onRead = onRead
+        self.onHash = onHash
     }
 
     func resolve(_ reference: RecentFileReference) -> RecentFileResolution {
@@ -158,7 +162,7 @@ struct RecentFileResolver {
         } catch { return .unavailable(.needsLocation) }
         defer { close(descriptor) }
         do {
-            let snapshot = try RecentFileDescriptor.snapshot(descriptor)
+            let snapshot = try RecentFileDescriptor.snapshot(descriptor, onRead: onRead, onHash: onHash)
             guard snapshot.byteCount == reference.byteCount, snapshot.sha256 == reference.sha256,
                   reference.volumeUUID == nil || snapshot.volumeUUID == reference.volumeUUID,
                   reference.documentIdentifier == nil || snapshot.documentIdentifier == reference.documentIdentifier,
@@ -226,7 +230,9 @@ private enum RecentFileDescriptor {
         return fd
     }
 
-    static func snapshot(_ fd: Int32) throws -> Snapshot {
+    static func snapshot(_ fd: Int32, onRead: (@Sendable (Int) -> Void)? = nil,
+                         onHash: (@Sendable (Int) -> Void)? = nil) throws -> Snapshot {
+        try Task.checkCancellation()
         var before = stat()
         guard fstat(fd, &before) == 0, before.st_size >= 0,
               UInt64(before.st_size) <= RecentFileReference.maximumFileBytes else {
@@ -236,6 +242,7 @@ private enum RecentFileDescriptor {
         data.reserveCapacity(Int(before.st_size))
         var block = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
+            try Task.checkCancellation()
             let count = block.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if count < 0 {
                 if errno == EINTR { continue }
@@ -246,6 +253,7 @@ private enum RecentFileDescriptor {
                 throw RecentFileReferenceError.unavailable(.replaced)
             }
             data.append(contentsOf: block[..<count])
+            onRead?(count)
         }
         var after = stat()
         guard fstat(fd, &after) == 0, sameFile(before, after),
@@ -254,7 +262,10 @@ private enum RecentFileDescriptor {
               before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec else {
             throw RecentFileReferenceError.unavailable(.replaced)
         }
+        try Task.checkCancellation()
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        onHash?(data.count)
+        try Task.checkCancellation()
         guard let volumeUUID = volumeUUID(fd), let persistentFileID = persistentFileID(fd),
               persistentFileID != 0 else {
             throw RecentFileReferenceError.unavailable(.needsLocation)

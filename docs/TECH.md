@@ -64,6 +64,12 @@ The view uses native existing-folder panels, standard window chrome, semantic co
 
 Frontmost app: `NSWorkspace.shared.frontmostApplication` sampled at detection time is only a best-effort naming hint. History remains future work (small JSON store or SQLite).
 
+## Bounded Recent row validation (#163 resource slice)
+
+Visible-row validation and preview decoding share the existing worker queue: one worker by default, clamped to at most two, with at most 64 admitted jobs. Queued rows hold references and work descriptions, never full encoded snapshots. Each worker resolves the bookmark, performs the descriptor identity/content checks and one full read/hash, and decodes from that same snapshot. Only the bounded decoded thumbnail and optional refreshed bookmark return to MainActor. A decoded-cache hit still validates the file afresh; it skips decoding, not authority checks. Failed validation evicts the cached preview. Decode failure alone leaves a verified file usable without a thumbnail.
+
+Read loops check cancellation between 64 KiB chunks and around hashing. Cancelling a queued row prevents its read; cancelling a running row or closing the panel fences its result while retaining the worker slot until actual exit. Existing generation, visibility and revision checks protect row/bookmark publication. Limits remain 64 MiB per encoded snapshot, 512 pixels maximum thumbnail edge and 8 MiB stored decoded cache. These are application data/cache bounds, not a process RSS claim or a bound on framework-internal allocations. Explicit file actions/OCR keep their separate identity revalidation paths; no screenshot admission or saving is enabled by this repair.
+
 ## Explicit local Copy Text (#240)
 
 The Recent row's Copy Text action uses only its verified saved-copy reference, immutable capture ID and record revision. It does not use the original, thumbnail, current selection, or automatic capture monitoring. One job is admitted with no pending queue; cancel, panel dismissal, history removal, or a newer manual image/file Copy fence late publication. Cancellation retains the admission slot until synchronous Vision work returns. Other row actions remain available, and the configured Image/File/Both mode is unchanged.

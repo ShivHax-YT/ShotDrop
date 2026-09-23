@@ -53,10 +53,17 @@ enum RecentPreviewError: Error, Equatable {
     case queueFull
 }
 
+/// Row validation never exports its full encoded snapshot to MainActor.
+enum RecentRowValidation: Sendable {
+    case available(preview: RecentPreviewImage?, refreshedReference: RecentFileReference?)
+    case unavailable(RecentFileIssue)
+}
+
 /// Call from a row task and cancel that task when the row disappears. Loading and decoding
 /// share a bounded worker slot, so queued rows do not retain full encoded screenshot data.
 actor RecentPreviewCache {
     typealias Loader = @Sendable () throws -> Data
+    typealias RowResolver = @Sendable (RecentFileReference) throws -> RecentFileResolution
     static let maximumCacheBytes = 8 * 1_024 * 1_024
     static let maximumEncodedBytes = 64 * 1_024 * 1_024
 
@@ -75,8 +82,21 @@ actor RecentPreviewCache {
     private struct Job {
         let key: RecentPreviewKey
         let generation: UInt64
-        let load: Loader
-        let continuation: CheckedContinuation<RecentPreviewImage, Error>
+        let work: @Sendable (RecentPreviewImage?) throws -> WorkResult
+        let continuation: CheckedContinuation<WorkResult, Error>
+    }
+
+    private enum WorkResult: Sendable {
+        case preview(RecentPreviewImage)
+        case row(RecentRowValidation)
+
+        var preview: RecentPreviewImage? {
+            switch self {
+            case .preview(let image): image
+            case .row(.available(let image, _)): image
+            case .row(.unavailable): nil
+            }
+        }
     }
 
     private let concurrencyLimit: Int
@@ -104,29 +124,64 @@ actor RecentPreviewCache {
             entries[key] = entry
             return entry.image
         }
+        let result = try await submit(key: key) { cached in
+            if let cached { return .preview(cached) }
+            let data = try load()
+            try Task.checkCancellation()
+            return .preview(try Self.decode(data, maximum: key.maxPixel))
+        }
+        guard case .preview(let image) = result else { throw RecentPreviewError.decodeFailed }
+        return image
+    }
+
+    /// Validation always runs, including on decoded-cache hits. The one verified
+    /// snapshot is decoded inside the same worker slot, then released there.
+    func validateRow(captureID: UUID, reference: RecentFileReference, maxPixel: Int = 112,
+                     resolve: @escaping RowResolver = { RecentFileResolver().resolve($0) }) async throws -> RecentRowValidation {
+        let key = RecentPreviewKey(captureID: captureID, reference: reference, maxPixel: maxPixel)
+        try Task.checkCancellation()
+        invalidateReplacedVersions(by: key)
+        let result = try await submit(key: key) { cached in
+            let resolution = try resolve(reference)
+            try Task.checkCancellation()
+            switch resolution {
+            case .unavailable(let issue): return .row(.unavailable(issue))
+            case .available(let file):
+                guard file.role == reference.role else { return .row(.unavailable(.replaced)) }
+                let image = cached ?? (try? Self.decode(file.validatedData, maximum: key.maxPixel))
+                try Task.checkCancellation()
+                return .row(.available(preview: image, refreshedReference: file.refreshedReference))
+            }
+        }
+        guard case .row(let validation) = result else { throw RecentPreviewError.decodeFailed }
+        return validation
+    }
+
+    private func submit(key: RecentPreviewKey,
+                        work: @escaping @Sendable (RecentPreviewImage?) throws -> WorkResult) async throws -> WorkResult {
         let identifier = UUID()
-        let image: RecentPreviewImage = try await withTaskCancellationHandler(
+        let result: WorkResult = try await withTaskCancellationHandler(
             operation: {
-                try await self.enqueue(identifier: identifier, key: key, load: load)
+                try await self.enqueue(identifier: identifier, key: key, work: work)
             },
             onCancel: {
                 Task<Void, Never> { await self.cancel(identifier) }
             }
         )
         try Task.checkCancellation()
-        return image
+        return result
     }
 
     private func enqueue(identifier: UUID, key: RecentPreviewKey,
-                         load: @escaping Loader) async throws -> RecentPreviewImage {
+                         work: @escaping @Sendable (RecentPreviewImage?) throws -> WorkResult) async throws -> WorkResult {
         try Task.checkCancellation()
         return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<RecentPreviewImage, Error>) in
+            (continuation: CheckedContinuation<WorkResult, Error>) in
             guard jobs.count < 64 else {
                 continuation.resume(throwing: RecentPreviewError.queueFull)
                 return
             }
-            jobs[identifier] = Job(key: key, generation: generation, load: load,
+            jobs[identifier] = Job(key: key, generation: generation, work: work,
                                    continuation: continuation)
             queue.append(identifier)
             startAvailableJobs()
@@ -174,32 +229,31 @@ actor RecentPreviewCache {
         while running.count < concurrencyLimit, !queue.isEmpty {
             let identifier = queue.removeFirst()
             guard let job = jobs[identifier] else { continue }
-            let load = job.load
-            let maximum = job.key.maxPixel
+            let work = job.work
+            let cached = entries[job.key]?.image
             running[identifier] = Task.detached(priority: .utility) { [weak self] in
-                let result: Result<RecentPreviewImage, Error>
+                let result: Result<WorkResult, Error>
                 do {
                     try Task.checkCancellation()
-                    let image = try autoreleasepool {
-                        let data = try load()
-                        try Task.checkCancellation()
-                        return try Self.decode(data, maximum: maximum)
-                    }
+                    let value = try autoreleasepool { try work(cached) }
                     try Task.checkCancellation()
-                    result = .success(image)
+                    result = .success(value)
                 } catch { result = .failure(error) }
                 await self?.finish(identifier, result: result)
             }
         }
     }
 
-    private func finish(_ identifier: UUID, result: Result<RecentPreviewImage, Error>) {
+    private func finish(_ identifier: UUID, result: Result<WorkResult, Error>) {
         running.removeValue(forKey: identifier)
         if let job = jobs.removeValue(forKey: identifier) {
             if job.generation != generation {
                 job.continuation.resume(throwing: CancellationError())
             } else {
-                if case .success(let image) = result { store(image, for: job.key) }
+                if case .success(let value) = result {
+                    if let image = value.preview { store(image, for: job.key) }
+                    else { removeEntry(job.key) }
+                }
                 job.continuation.resume(with: result)
             }
         }
