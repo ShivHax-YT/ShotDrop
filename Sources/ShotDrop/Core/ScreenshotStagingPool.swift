@@ -105,6 +105,41 @@ struct ScreenshotStagingPool: Sendable {
         catch { throw poolFailure("Default destination enrollment is paused: \(error.localizedDescription)") }
     }
 
+    func validatePolicyRegistration(at root: URL, sourceDirectory: URL,
+                                    attestation: DefaultDestinationAttestation) throws {
+        let session = try PoolSession.open(at: registryDirectory, volumeInspector: volumeInspector,
+                                          liveDeviceReader: liveDeviceReader, fault: fault)
+        defer { session.close() }
+        let destination = URL(fileURLWithPath: attestation.binding.path, isDirectory: true)
+        try LocalScreenshotDestinationValidator().validate(sourceDirectory: sourceDirectory,
+                                                           destinationDirectory: destination)
+        let descriptor = try poolOpenExistingDirectory(destination)
+        defer { close(descriptor) }
+        let volume = try volumeInspector.inspect(descriptor)
+        try volume.requireSupported()
+        guard volume.device == attestation.liveDevice,
+              try liveDeviceReader(descriptor) == volume.device,
+              let registered = session.registry.roots.first(where: { $0.path == root.path }),
+              registered.ready, registered.volumeUUID == volume.volumeUUID,
+              registered.policyBinding == attestation.binding else {
+            throw poolFailure("The default destination enrollment no longer matches its receipt.")
+        }
+        try attestation.binding.requireCurrent(descriptor: descriptor, inspector: defaultPolicyInspector)
+        let rootFD = try poolOpenDirectory(root)
+        defer { close(rootFD) }
+        guard try PoolIdentity.read(rootFD, volume: volume, liveDeviceReader: liveDeviceReader,
+                                    directory: true) == registered.identity else {
+            throw poolFailure("The enrolled staging root changed.")
+        }
+    }
+
+    func hasRootReservation(at root: URL) throws -> Bool {
+        let session = try PoolSession.open(at: registryDirectory, volumeInspector: volumeInspector,
+                                          liveDeviceReader: liveDeviceReader, fault: fault)
+        defer { session.close() }
+        return session.registry.roots.contains { $0.path == root.path }
+    }
+
     private func registerNewRoot(at root: URL, sourceDirectory: URL, destinationDirectory: URL,
                                  policyBinding: DefaultDestinationPolicyBinding?,
                                  liveDevice: UInt64? = nil) throws {
@@ -150,6 +185,9 @@ struct ScreenshotStagingPool: Sendable {
             throw poolFailure("The staging root must be on the same supported destination volume.")
         }
         let index = session.registry.roots.count
+        if let policyBinding {
+            try policyBinding.requireCurrent(descriptor: destinationFD, inspector: defaultPolicyInspector)
+        }
         session.registry.roots.append(PoolRoot(path: root.path, volumeUUID: rootVolume.volumeUUID, identity: nil, ready: false,
             destinationReview: destinationReview,
             policyBinding: policyBinding,
@@ -181,6 +219,9 @@ struct ScreenshotStagingPool: Sendable {
                 session.registry.roots[index].slots[slotIndex].state = .clean
             }
             guard fsync(rootFD) == 0, fsync(parentFD) == 0 else { throw poolPOSIX("Flush staging root") }
+            if let policyBinding {
+                try policyBinding.requireCurrent(descriptor: destinationFD, inspector: defaultPolicyInspector)
+            }
             session.registry.roots[index].ready = true
             try session.persist()
         } catch {

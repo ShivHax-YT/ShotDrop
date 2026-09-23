@@ -114,9 +114,11 @@ struct ShotDropSetupView: View {
             paragraph("Your original screenshots stay where they are. You can return to setup from the ShotDrop menu.")
                 .foregroundStyle(.secondary)
         case .destination:
-            paragraph("The default is Pictures/ShotDrop. You can change the destination later in Settings. For now, choose an existing folder; this build cannot create or approve a new destination. ShotDrop will check the folder when you continue; macOS may ask for access.")
+            paragraph(model.proposesSupportedDefault
+                ? "Pictures/ShotDrop is the proposed default on supported local setups. After you confirm the screenshot source, ShotDrop can check and prepare this folder. Saving stays paused until the remaining setup checks and automatic processing are complete."
+                : "This folder is selected for review. Choosing it does not approve automatic saving. ShotDrop will check access when you continue; macOS may ask for permission.")
             if let destination = model.destinationURL {
-                path(destination, label: "Save copies to")
+                path(destination, label: model.proposesSupportedDefault ? "Proposed default" : "Selected for review")
             }
             Button("Choose Another Folder…") { chooseFolder(.destinationPicker) }
                 .frame(minHeight: buttonHeight)
@@ -128,6 +130,9 @@ struct ShotDropSetupView: View {
                 .foregroundStyle(.secondary)
         case .source:
             paragraph("Press Shift–Command–5, then look in Options > Save to. Confirm that the folder below is where macOS currently saves your screenshots.")
+            if model.proposesSupportedDefault {
+                paragraph("Prepare Default Folder may create Pictures/ShotDrop after its checks pass. Existing or interrupted setup folders are kept for review. Your originals stay in place.")
+            }
             if let source = model.sourceURL {
                 paragraph("ShotDrop needs to read this folder to find new screenshots. macOS may ask for access when you continue.")
                 path(source, label: model.isSourceLocationUnknown ? "Previously selected screenshot folder" : "Screenshot folder to confirm")

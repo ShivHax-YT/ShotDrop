@@ -48,9 +48,11 @@ final class ShotDropSetupModel {
     private(set) var destinationIssue: ShotDropSetupAccessIssue?
     private(set) var requiresSourceSelection = false
     private(set) var isSourceLocationUnknown = false
+    private(set) var defaultPreparationResult: DefaultDestinationPreparationResult?
 
     @ObservationIgnored private let service: any ShotDropSetupAccessServing
     @ObservationIgnored private let gate: any ShotDropSetupReadinessGating
+    @ObservationIgnored private let defaultPreparer: (any DefaultDestinationSetupPreparing)?
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var expectedSourceIdentity: ShotDropSetupDirectoryIdentity?
@@ -59,16 +61,21 @@ final class ShotDropSetupModel {
 
     init(destinationURL: URL? = nil, sourceURL: URL? = nil,
          service: any ShotDropSetupAccessServing = LocalShotDropSetupAccessService(),
-         gate: any ShotDropSetupReadinessGating = ShotDropSetupUnavailableGate()) {
+         gate: any ShotDropSetupReadinessGating = ShotDropSetupUnavailableGate(),
+         defaultPreparer: (any DefaultDestinationSetupPreparing)? = nil) {
         self.destinationURL = destinationURL
         self.sourceURL = sourceURL
         self.service = service
         self.gate = gate
+        self.defaultPreparer = defaultPreparer
     }
+
+    var proposesSupportedDefault: Bool { destinationURL?.path == defaultPreparer?.proposedDestination.path && defaultPreparer != nil }
 
     var canGoBack: Bool { isPresented && step != .welcome }
     var canContinue: Bool {
         guard isPresented, !isBusy else { return false }
+        if step == .source, let result = defaultPreparationResult, !result.permitsRetry { return false }
         switch step {
         case .welcome: return true
         case .destination: return destinationURL != nil
@@ -79,8 +86,8 @@ final class ShotDropSetupModel {
     var primaryTitle: String {
         switch step {
         case .welcome: "Continue"
-        case .destination: destinationIssue == nil ? "Use This Folder" : "Retry"
-        case .source: sourceIssue == nil ? "Continue" : "Retry"
+        case .destination: proposesSupportedDefault ? "Review Default Setup" : (destinationIssue == nil ? "Use This Folder" : "Retry")
+        case .source: proposesSupportedDefault ? (defaultPreparationResult == nil ? "Prepare Default Folder" : "Retry Check") : (sourceIssue == nil ? "Continue" : "Retry")
         case .test: "Done"
         }
     }
@@ -91,6 +98,7 @@ final class ShotDropSetupModel {
 
     func selectDestination(_ url: URL) {
         invalidate()
+        defaultPreparationResult = nil
         destinationURL = url
         destinationIssue = nil
         destinationNeedsReview = false
@@ -101,6 +109,7 @@ final class ShotDropSetupModel {
     /// Selection is a draft only. It neither changes macOS preferences nor proves this is its source.
     func selectSource(_ url: URL) {
         invalidate()
+        defaultPreparationResult = nil
         sourceURL = url
         sourceIssue = nil
         requiresSourceSelection = false
@@ -163,6 +172,7 @@ final class ShotDropSetupModel {
 
     func reopen() {
         invalidate()
+        defaultPreparationResult = nil
         step = .welcome
         isPresented = true
         isDeferred = false
@@ -196,6 +206,13 @@ final class ShotDropSetupModel {
 
     private func inspectDestination(token: UInt64) async {
         guard let destinationURL else { return }
+        if proposesSupportedDefault {
+            destinationIssue = nil
+            destinationNeedsReview = true
+            step = .source
+            await discoverSource(token: token)
+            return
+        }
         let result = await service.checkDestination(destinationURL, source: nil, sourceIdentity: nil)
         guard isCurrent(token) else { return }
         switch result {
@@ -249,6 +266,14 @@ final class ShotDropSetupModel {
             sourceIssue = issue
             statusMessage = message(for: issue, folder: "screenshot source")
             return
+        }
+        if proposesSupportedDefault, let defaultPreparer {
+            let result = await defaultPreparer.prepare(source: sourceIdentity)
+            guard isCurrent(token) else { return }
+            defaultPreparationResult = result
+            destinationNeedsReview = true
+            statusMessage = result.message
+            return // Enrollment cannot enable the separately unfinished processing pipeline.
         }
         let destinationResult = await service.checkDestination(destinationURL, source: sourceURL,
                                                                sourceIdentity: sourceIdentity)

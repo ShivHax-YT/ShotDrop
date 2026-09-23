@@ -7,6 +7,11 @@ enum DefaultDestinationIssuerIssue: Error, Equatable, Sendable {
     case changed
     case unsupported
     case enrollmentPaused
+    case enrollmentUncharged, enrollmentCharged
+}
+
+enum DefaultDestinationIssuerCheckpoint: Sendable {
+    case beforeIntent, afterIntent, afterCreation, afterCreatedReceipt, afterRegistration
 }
 
 /// Durable part of the policy decision. It is an application invariant, not a credential
@@ -64,6 +69,13 @@ struct DefaultDestinationPolicyBinding: Codable, Equatable, Sendable {
             try Self.requireUnmanagedChild(inspection.childPath, descriptor: childFD,
                                            inspector: inspector)
             try inspector.revalidate(inspection, parentDescriptor: parentFD)
+            let confirmed = openat(parentFD, "ShotDrop", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
+            guard confirmed >= 0 else { throw DefaultDestinationIssuerIssue.changed }
+            defer { close(confirmed) }
+            guard try Self.capture(confirmed, inspection: inspection) == self,
+                  try Self.capture(descriptor, inspection: inspection) == self else {
+                throw DefaultDestinationIssuerIssue.changed
+            }
         }
     }
 
@@ -76,10 +88,7 @@ struct DefaultDestinationPolicyBinding: Codable, Equatable, Sendable {
         do { cloud = try inspector.operations.isUbiquitous(url) }
         catch { throw DefaultDestinationIssuerIssue.unsupported }
         guard cloud == false else { throw DefaultDestinationIssuerIssue.unsupported }
-        let provider: Bool?
-        do { provider = try inspector.operations.isProviderManaged(url, descriptor) }
-        catch { throw DefaultDestinationIssuerIssue.unsupported }
-        guard provider == false else { throw DefaultDestinationIssuerIssue.unsupported }
+        try inspector.operations.checkProviderPolicy(url, descriptor: descriptor)
         guard try DefaultDestinationDirectoryIdentity(descriptor) == before else {
             throw DefaultDestinationIssuerIssue.changed
         }
@@ -104,6 +113,51 @@ struct DefaultDestinationIssuer: Sendable {
     let inspector: DefaultDestinationPolicyPathInspector
     let journal: DefaultDestinationJournal
     let pool: ScreenshotStagingPool
+    private let checkpoint: @Sendable (DefaultDestinationIssuerCheckpoint) throws -> Void
+
+    init(inspector: DefaultDestinationPolicyPathInspector, journal: DefaultDestinationJournal,
+         pool: ScreenshotStagingPool,
+         checkpoint: @escaping @Sendable (DefaultDestinationIssuerCheckpoint) throws -> Void = { _ in }) {
+        self.inspector = inspector
+        self.journal = journal
+        self.pool = pool
+        self.checkpoint = checkpoint
+    }
+
+    /// Only a completed enrollment receipt can resume. An interrupted creation remains a
+    /// review case even when a folder with the expected name exists.
+    func resumeEnrolled(sourceDirectory: URL, stagingRoot: URL) throws -> DefaultDestinationAttestation {
+        guard case .enrolled(let receipt) = try journal.load() else {
+            throw DefaultDestinationIssuerIssue.needsReview
+        }
+        return try inspector.withInspectedParent { parentFD, inspection in
+            guard receipt.intent.policyVersion == DefaultDestinationPolicyBinding.currentVersion,
+                  receipt.intent.destinationPath == inspection.childPath.path,
+                  receipt.intent.volumeUUID == inspection.volume.volumeUUID,
+                  receipt.intent.parent.path == inspection.path.path,
+                  receipt.intent.parent.inode == inspection.identity.inode,
+                  receipt.intent.parent.birthSeconds == inspection.identity.birthSeconds,
+                  receipt.intent.parent.birthNanoseconds == inspection.identity.birthNanoseconds else {
+                throw DefaultDestinationIssuerIssue.changed
+            }
+            try LocalScreenshotDestinationValidator().validate(sourceDirectory: sourceDirectory,
+                destinationDirectory: inspection.childPath)
+            let childFD = openat(parentFD, "ShotDrop", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
+            guard childFD >= 0 else { throw DefaultDestinationIssuerIssue.changed }
+            defer { close(childFD) }
+            let binding = try DefaultDestinationPolicyBinding.capture(childFD, inspection: inspection)
+            guard binding.inode == receipt.created.inode,
+                  binding.birthSeconds == receipt.created.birthSeconds,
+                  binding.birthNanoseconds == receipt.created.birthNanoseconds else {
+                throw DefaultDestinationIssuerIssue.changed
+            }
+            try binding.requireCurrent(descriptor: childFD, inspector: inspector)
+            let attestation = DefaultDestinationAttestation(binding: binding, liveDevice: inspection.volume.device)
+            try pool.validatePolicyRegistration(at: stagingRoot, sourceDirectory: sourceDirectory,
+                                                 attestation: attestation)
+            return attestation
+        }
+    }
 
     func createAndEnroll(sourceDirectory: URL, stagingRoot: URL) throws -> DefaultDestinationAttestation {
         try inspector.withInspectedParent { parentFD, inspection in
@@ -120,7 +174,9 @@ struct DefaultDestinationIssuer: Sendable {
                 birthNanoseconds: inspection.identity.birthNanoseconds)
             let intent = try DefaultDestinationJournal.Intent(destination: inspection.childPath,
                 volumeUUID: inspection.volume.volumeUUID, parent: parentIdentity)
+            try checkpoint(.beforeIntent)
             try journal.begin(intent)
+            try checkpoint(.afterIntent)
             try inspector.revalidate(inspection, parentDescriptor: parentFD)
             guard mkdirat(parentFD, "ShotDrop", 0o700) == 0 else {
                 throw DefaultDestinationIssuerIssue.collision
@@ -128,6 +184,10 @@ struct DefaultDestinationIssuer: Sendable {
             let childFD = openat(parentFD, "ShotDrop", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
             guard childFD >= 0 else { throw DefaultDestinationIssuerIssue.changed }
             defer { close(childFD) }
+            try checkpoint(.afterCreation)
+            guard fsync(childFD) == 0, fsync(parentFD) == 0 else {
+                throw DefaultDestinationIssuerIssue.needsReview
+            }
             try inspector.revalidate(inspection, parentDescriptor: parentFD)
             try DefaultDestinationPolicyBinding.requireUnmanagedChild(inspection.childPath,
                 descriptor: childFD, inspector: inspector)
@@ -137,13 +197,22 @@ struct DefaultDestinationIssuer: Sendable {
                 device: inspection.volume.device, inode: binding.inode,
                 birthSeconds: binding.birthSeconds, birthNanoseconds: binding.birthNanoseconds)
             try journal.recordCreated(intent, created: created)
+            try checkpoint(.afterCreatedReceipt)
             let attestation = DefaultDestinationAttestation(binding: binding,
                                                              liveDevice: inspection.volume.device)
             do {
                 try pool.registerPolicyRoot(at: stagingRoot, sourceDirectory: sourceDirectory,
                                             destinationDirectory: inspection.childPath,
                                             attestation: attestation)
-            } catch { throw DefaultDestinationIssuerIssue.enrollmentPaused }
+            } catch {
+                guard let charged = try? pool.hasRootReservation(at: stagingRoot) else {
+                    throw DefaultDestinationIssuerIssue.enrollmentPaused
+                }
+                throw charged ? DefaultDestinationIssuerIssue.enrollmentCharged : .enrollmentUncharged
+            }
+            try pool.validatePolicyRegistration(at: stagingRoot, sourceDirectory: sourceDirectory,
+                                                 attestation: attestation)
+            try checkpoint(.afterRegistration)
             try journal.recordEnrolled(intent, created: created)
             return attestation
         }

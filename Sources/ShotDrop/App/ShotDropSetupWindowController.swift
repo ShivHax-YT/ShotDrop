@@ -12,7 +12,8 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
     init(settings: AppSettings) {
         self.settings = settings
         model = ShotDropSetupModel(destinationURL: URL(fileURLWithPath: settings.destinationPath,
-                                                      isDirectory: true))
+                                                      isDirectory: true),
+                                   defaultPreparer: LocalDefaultDestinationSetupPreparation())
         super.init()
     }
 

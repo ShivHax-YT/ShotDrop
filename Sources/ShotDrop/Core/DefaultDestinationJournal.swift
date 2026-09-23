@@ -84,7 +84,8 @@ struct DefaultDestinationJournal: Sendable {
         let enrolled: Bool
     }
 
-    /// Read-only. A stale temporary file is itself evidence of an interrupted write.
+    /// Does not change the receipt. Acquiring the lock may create its bounded lock file.
+    /// A stale temporary file is itself evidence of an interrupted write.
     func load() throws -> State {
         try withLock { fd in try read(fd) }
     }

@@ -2,6 +2,10 @@
 
 Judgment calls made without asking. `YYYY-MM-DD | decision | why | who`
 
+2026-09-23 | #597 uses the approved ordinary-home default policy explicitly; absence of an optional provider evidence adapter is an assumption under that policy, not a fabricated negative query result. Every required path, volume and iCloud check still rejects uncertainty. | Main's conditional approval cannot prove absence of all third-party sync. | implementor
+2026-09-23 | #597 Main #635 preserves #228 charged root intent after uncertain registration failure; only failures before durable pool registration are guaranteed uncharged. Recovery reports these states separately and never refunds or deletes an uncertain object. | Durable capacity accounting must survive interruption. | implementor
+2026-09-23 | #597 Main #672 requires fresh production registries to retain legacyArtifactsAccountedFor=false. Default-folder enrollment cannot unlock saving or the setup test page; legacy review and #231 remain separate gates. | Folder creation is not proof of absent legacy staging artifacts. | implementor
+
 2026-09-22 | M0 uses native SwiftUI MenuBarExtra and Settings scenes, Observation-backed preferences, and SMAppService.mainApp. No third-party dependencies. | Keeps the macOS 14 scaffold small and idle without timers. | implementor
 2026-09-22 | Launch at login defaults off and changes only from an explicit settings action; the UI reflects Service Management status and approval/error states. | Registration is user intent, not a startup side effect. | implementor
 2026-09-22 | M0 stores future capture preferences but clearly labels screenshot processing as unavailable until M1; no file watchers, clipboard writes, or folder creation at startup. | A usable shell must not imply a working screenshot pipeline or trigger premature privacy prompts. | implementor

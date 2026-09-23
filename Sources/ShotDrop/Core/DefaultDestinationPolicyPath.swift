@@ -40,9 +40,20 @@ struct DefaultDestinationPolicyOperations: Sendable {
     var isUbiquitous: @Sendable (URL) throws -> Bool? = {
         try $0.resourceValues(forKeys: [.isUbiquitousItemKey]).isUbiquitousItem
     }
-    /// The issuer supplies a reviewed provider-status mechanism. There is no universal
-    /// File Provider negative signal in this read-only path inspector.
-    var isProviderManaged: @Sendable (URL, Int32) throws -> Bool? = { _, _ in false }
+    /// Nil selects Main's approved ordinary-home support assumption, after the exact path,
+    /// volume and iCloud gates. It is not a measured negative provider result. If a caller
+    /// supplies additional evidence, a positive, unknown or failed query rejects the path.
+    var isProviderManaged: (@Sendable (URL, Int32) throws -> Bool?)? = nil
+
+    func checkProviderPolicy(_ url: URL, descriptor: Int32) throws {
+        guard let isProviderManaged else { return }
+        let evidence: Bool?
+        do { evidence = try isProviderManaged(url, descriptor) }
+        catch { throw DefaultDestinationPolicyIssue.providerStatusUnknown }
+        guard evidence == false else {
+            throw evidence == true ? DefaultDestinationPolicyIssue.unsupported : .providerStatusUnknown
+        }
+    }
 }
 
 /// Inspects only the exact existing account-home/Pictures parent. No child lookup,
@@ -87,12 +98,14 @@ struct DefaultDestinationPolicyPathInspector: Sendable {
         let homeFD = try openPathFromRoot(expectedHome.path)
         defer { close(homeFD) }
         let homeIdentity = try DefaultDestinationDirectoryIdentity(homeFD)
+        try requireOwnedParent(homeFD)
         let picturesFD = openat(homeFD, "Pictures", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
         guard picturesFD >= 0 else {
             throw errno == ENOENT ? DefaultDestinationPolicyIssue.missingPictures : DefaultDestinationPolicyIssue.unsafePath
         }
         defer { close(picturesFD) }
         let picturesIdentity = try DefaultDestinationDirectoryIdentity(picturesFD)
+        try requireOwnedParent(picturesFD)
         guard homeIdentity.device == picturesIdentity.device else {
             throw DefaultDestinationPolicyIssue.unsupported
         }
@@ -111,12 +124,7 @@ struct DefaultDestinationPolicyPathInspector: Sendable {
         guard cloud == false else {
             throw cloud == true ? DefaultDestinationPolicyIssue.unsupported : DefaultDestinationPolicyIssue.cloudStatusUnknown
         }
-        let provider: Bool?
-        do { provider = try operations.isProviderManaged(picturesPath, picturesFD) }
-        catch { throw DefaultDestinationPolicyIssue.providerStatusUnknown }
-        guard provider == false else {
-            throw provider == true ? DefaultDestinationPolicyIssue.unsupported : DefaultDestinationPolicyIssue.providerStatusUnknown
-        }
+        try operations.checkProviderPolicy(picturesPath, descriptor: picturesFD)
         let currentHome = try openPathFromRoot(expectedHome.path)
         defer { close(currentHome) }
         let currentPictures = openat(currentHome, "Pictures", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
@@ -163,10 +171,24 @@ struct DefaultDestinationPolicyPathInspector: Sendable {
         do { cloud = try operations.isUbiquitous(parent.path) }
         catch { throw DefaultDestinationPolicyIssue.cloudStatusUnknown }
         guard cloud == false else { throw cloud == true ? DefaultDestinationPolicyIssue.unsupported : DefaultDestinationPolicyIssue.cloudStatusUnknown }
-        let provider: Bool?
-        do { provider = try operations.isProviderManaged(parent.path, parentDescriptor) }
-        catch { throw DefaultDestinationPolicyIssue.providerStatusUnknown }
-        guard provider == false else { throw provider == true ? DefaultDestinationPolicyIssue.unsupported : DefaultDestinationPolicyIssue.providerStatusUnknown }
+        try operations.checkProviderPolicy(parent.path, descriptor: parentDescriptor)
+        let confirmedHome = try openPathFromRoot(expectedHome.path)
+        defer { close(confirmedHome) }
+        let confirmedPictures = openat(confirmedHome, "Pictures", O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
+        guard confirmedPictures >= 0 else { throw DefaultDestinationPolicyIssue.changed }
+        defer { close(confirmedPictures) }
+        guard try DefaultDestinationDirectoryIdentity(confirmedHome) == parent.homeIdentity,
+              try DefaultDestinationDirectoryIdentity(confirmedPictures) == parent.identity else {
+            throw DefaultDestinationPolicyIssue.changed
+        }
+        try requireOwnedParent(confirmedHome)
+        try requireOwnedParent(confirmedPictures)
+    }
+
+    private func requireOwnedParent(_ descriptor: Int32) throws {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_uid == geteuid(),
+              info.st_mode & 0o022 == 0 else { throw DefaultDestinationPolicyIssue.unsafePath }
     }
 
     private func isSingleComponent(_ name: String) -> Bool {

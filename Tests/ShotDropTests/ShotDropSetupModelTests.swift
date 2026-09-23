@@ -7,6 +7,43 @@ final class ShotDropSetupModelTests: XCTestCase {
     private let source = URL(fileURLWithPath: "/fixture/source", isDirectory: true)
     private let destination = URL(fileURLWithPath: "/fixture/destination", isDirectory: true)
 
+    func testDefaultPreparationRequiresConfirmationAndAlwaysKeepsProcessingPaused() async {
+        for result in [DefaultDestinationPreparationResult.enrolledPaused, .reviewRequired,
+                       .reservedRecovery, .unreservedRecovery, .missingPictures, .unsupported, .retryable] {
+            let preparer = SetupDefaultPreparerFixture(proposedDestination: destination, result: result)
+            let model = ShotDropSetupModel(destinationURL: destination, service: SetupServiceFixture(),
+                                           gate: SetupGateFixture.approved, defaultPreparer: preparer)
+            await model.continueSetup()
+            await model.continueSetup()
+            XCTAssertEqual(model.step, .source)
+            await model.continueSetup()
+            let before = await preparer.count
+            XCTAssertEqual(before, 0)
+            model.confirmCurrentSource(true)
+            await model.continueSetup()
+            let after = await preparer.count
+            XCTAssertEqual(after, 1)
+            XCTAssertEqual(model.defaultPreparationResult, result)
+            XCTAssertEqual(model.canContinue, result.permitsRetry)
+            XCTAssertFalse(model.canRunTest)
+            XCTAssertEqual(model.step, .source)
+        }
+    }
+
+    func testFailedSourceAccessNeverPreparesDefault() async {
+        let service = SetupServiceFixture()
+        await service.setSourceFailure(.changed)
+        let preparer = SetupDefaultPreparerFixture(proposedDestination: destination, result: .enrolledPaused)
+        let model = ShotDropSetupModel(destinationURL: destination, service: service, defaultPreparer: preparer)
+        await model.continueSetup()
+        await model.continueSetup()
+        model.confirmCurrentSource(true)
+        await model.continueSetup()
+        let count = await preparer.count
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(model.sourceIssue, .changed)
+    }
+
     func testSelectionAndWelcomeDoNotRequestAccess() async {
         let service = SetupServiceFixture()
         let model = ShotDropSetupModel(service: service)
@@ -344,6 +381,22 @@ final class ShotDropSetupModelTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Source check did not suspend")
+    }
+}
+
+private actor SetupDefaultPreparerFixture: DefaultDestinationSetupPreparing {
+    nonisolated let proposedDestination: URL
+    let result: DefaultDestinationPreparationResult
+    var count = 0
+
+    init(proposedDestination: URL, result: DefaultDestinationPreparationResult) {
+        self.proposedDestination = proposedDestination
+        self.result = result
+    }
+
+    func prepare(source: ShotDropSetupDirectoryIdentity) async -> DefaultDestinationPreparationResult {
+        count += 1
+        return result
     }
 }
 
