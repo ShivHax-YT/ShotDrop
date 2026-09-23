@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum RecentMenuAction: Sendable {
-    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, annotate, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
+    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, annotate, pin, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
 }
 
 struct RecentMenuRow: Identifiable, Sendable {
@@ -22,7 +22,7 @@ struct RecentMenuRow: Identifiable, Sendable {
 
     func allows(_ action: RecentMenuAction) -> Bool {
         switch action {
-        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .revealSaved:
+        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .pin, .revealSaved:
             availability == .saved
         case .revealOriginal: availability == .sourceOnly
         case .retryFileCheck: availability == .unavailable || availability == .saved
@@ -47,6 +47,9 @@ struct RecentMenuPanel: View {
     let onRowVisible: (UUID, Bool) -> Void
     var textCopyStates: [UUID: ScreenshotTextCopyState] = [:]
     var isRecognizingText = false
+    var pinCount = 0
+    var onManagePins: () -> Void = {}
+    var pinFeedback: [UUID: String] = [:]
     var annotationFeedback: [UUID: String] = [:]
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -108,6 +111,15 @@ struct RecentMenuPanel: View {
             }
         }
         .onChange(of: annotationFeedback) { old, new in
+            guard let window = panelWindowReference.window else { return }
+            for row in rows {
+                guard let feedback = new[row.id], old[row.id] != feedback else { continue }
+                NSAccessibility.post(element: window, notification: .announcementRequested,
+                                     userInfo: [.announcement: "\(row.displayName): \(feedback)",
+                                                .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+            }
+        }
+        .onChange(of: pinFeedback) { old, new in
             guard let window = panelWindowReference.window else { return }
             for row in rows {
                 guard let feedback = new[row.id], old[row.id] != feedback else { continue }
@@ -182,16 +194,23 @@ struct RecentMenuPanel: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
-            if !rows.isEmpty {
-                Button("Clear History") { clearRequested = true }
-                    .help("Remove recent entries. Screenshot files remain in their folders.")
+        VStack(spacing: 12) {
+            HStack {
+                if !rows.isEmpty {
+                    Button("Clear History") { clearRequested = true }
+                        .help("Remove recent entries. Screenshot files remain in their folders.")
+                }
+                Spacer(minLength: 4)
+                Button("Pins (\(pinCount))", action: onManagePins)
+                    .help("Show or close pinned screenshots")
             }
-            Spacer(minLength: 4)
-            Button("Settings…", action: onOpenSettings)
-                .keyboardShortcut(",")
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .keyboardShortcut("q")
+            HStack {
+                Button("Settings…", action: onOpenSettings)
+                    .keyboardShortcut(",")
+                Spacer(minLength: 4)
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut("q")
+            }
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
@@ -213,6 +232,10 @@ struct RecentMenuPanel: View {
                             .font(.system(size: detailSize))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                        if let feedback = pinFeedback[row.id] {
+                            Text(feedback).font(.system(size: detailSize)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         if let feedback = annotationFeedback[row.id] {
                             Text(feedback)
                                 .font(.system(size: detailSize))
@@ -268,6 +291,9 @@ struct RecentMenuPanel: View {
         .onDisappear { onRowVisible(row.id, false) }
         .contextMenu { actionItems(row) }
         .accessibilityActions {
+            if row.allows(.pin) {
+                Button("Pin Screenshot, \(row.displayName)") { onAction(row.id, .pin) }
+            }
             if row.allows(.annotate) {
                 Button("Annotate \(row.displayName)") { onAction(row.id, .annotate) }
             }
@@ -289,6 +315,9 @@ struct RecentMenuPanel: View {
             .disabled(!row.allows(.open))
         Button("Copy Image") { onAction(row.id, .copyImage) }
             .disabled(!row.allows(.copyImage))
+        Button("Pin Screenshot") { onAction(row.id, .pin) }
+            .disabled(!row.allows(.pin))
+            .accessibilityLabel("Pin Screenshot, \(row.displayName)")
         Button("Annotate…") { onAction(row.id, .annotate) }
             .disabled(!row.allows(.annotate))
             .accessibilityLabel("Annotate \(row.displayName)")
@@ -336,7 +365,7 @@ struct RecentMenuPanel: View {
     }
 
     private func accessibilityValue(_ row: RecentMenuRow) -> String {
-        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(textCopyStates[row.id]?.message ?? ""). \(annotationFeedback[row.id] ?? ""). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
+        "Detected \(row.detectedAt.formatted(date: .complete, time: .complete)). \(row.detail). \(textCopyStates[row.id]?.message ?? ""). \(annotationFeedback[row.id] ?? ""). \(pinFeedback[row.id] ?? ""). \(row.savedPath ?? row.sourcePath ?? "File unavailable")"
     }
 
     private func makeImage(_ preview: RecentPreviewImage) -> NSImage? {

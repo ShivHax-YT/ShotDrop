@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class RecentMenuValidationStateTests: XCTestCase {
-    private let fileActions: [RecentMenuAction] = [.open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .revealSaved, .revealOriginal]
+    private let fileActions: [RecentMenuAction] = [.open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .pin, .revealSaved, .revealOriginal]
 
     func testAnnotationCapacityFeedbackDoesNotReplaceOperatingHeader() async throws {
         let fixture = try MenuStateFixture(); defer { fixture.remove() }

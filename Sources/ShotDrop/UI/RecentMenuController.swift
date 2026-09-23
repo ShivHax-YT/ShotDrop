@@ -10,6 +10,10 @@ final class RecentMenuController {
     private let previews: RecentPreviewCache
     private let validateRow: RowValidator
     private let settings: AppSettings
+    @ObservationIgnored private lazy var pinCoordinator = makePinCoordinator()
+    @ObservationIgnored private lazy var pinManager = PinManagerWindow()
+    private(set) var pinItems: [PinScreenshotCoordinator.Item] = []
+    private(set) var pinFeedback: [UUID: String] = [:]
     private let annotationEditor = AnnotationEditorCoordinator()
     private let annotationAdmission: ((AnnotationSessionIdentity) -> Bool)?
     @ObservationIgnored private lazy var annotationRecents = AnnotationRecentsRecoveryCoordinator(history: history)
@@ -73,7 +77,9 @@ final class RecentMenuController {
             let snapshot = try await history.snapshot()
             guard generation == requestGeneration else { return }
             historyUnavailable = false
-            records = Dictionary(uniqueKeysWithValues: snapshot.records.map { ($0.captureID, $0) })
+            let updatedRecords = Dictionary(uniqueKeysWithValues: snapshot.records.map { ($0.captureID, $0) })
+            pinFeedback = pinFeedback.filter { records[$0.key] == updatedRecords[$0.key] && updatedRecords[$0.key] != nil }
+            records = updatedRecords
             textCopy.retain(Set(records.keys))
             annotationFeedback = annotationFeedback.filter { records[$0.key] != nil }
             rows = snapshot.records.map(Self.makeRow)
@@ -85,6 +91,7 @@ final class RecentMenuController {
             rowTasks.removeAll()
             rowValidationTokens.removeAll()
             records.removeAll()
+            pinFeedback.removeAll()
             textCopy.retain([])
             rows = []
         }
@@ -100,6 +107,7 @@ final class RecentMenuController {
                 rowTasks.removeAll()
                 rowValidationTokens.removeAll()
                 records.removeAll()
+                pinFeedback.removeAll()
                 rows = []
                 historyUnavailable = false
                 await previews.clear()
@@ -112,6 +120,21 @@ final class RecentMenuController {
 
     func perform(_ id: UUID, _ action: RecentMenuAction) {
         guard let record = records[id], rows.first(where: { $0.id == id })?.allows(action) == true else { return }
+        if action == .pin {
+            guard let reference = record.savedReference, reference.role == .savedCopy else { return }
+            pinFeedback[id] = nil
+            Task {
+                let latest = try? await history.snapshot()
+                guard latest?.records.first(where: { $0.captureID == id }) == record, records[id] == record else {
+                    if records[id] == record {
+                        pinFeedback[id] = "This saved entry changed. Refresh Recents and try Pin again."
+                    }
+                    return
+                }
+                await pinCoordinator.pin(.init(captureID: id, revision: record.revision, reference: reference), filename: record.displayName)
+            }
+            return
+        }
         if action == .annotate {
             guard let reference = record.savedReference, reference.role == .savedCopy else { return }
             annotationTask?.cancel()
@@ -212,10 +235,47 @@ final class RecentMenuController {
                 case .copyPreferred, .copyImage, .copyFile:
                     await copy(file, id: id, mode: copyMode(for: action), generation: requestGeneration,
                                clipboardToken: clipboardToken)
-                case .copyText, .cancelCopyText, .annotate, .retryFileCheck, .removeFromRecents: break
+                case .copyText, .cancelCopyText, .annotate, .pin, .retryFileCheck, .removeFromRecents: break
                 }
             }
         }
+    }
+
+    private func makePinCoordinator() -> PinScreenshotCoordinator {
+        let actions = PinScreenshotActions(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general), beginClipboardIntent: { [weak self] in
+            guard let self else { return { throw CancellationError() } }
+            self.clipboardGeneration &+= 1; self.textCopy.cancel()
+            let token = self.clipboardGeneration
+            return { [weak self] in
+                guard self?.clipboardGeneration == token else { throw CancellationError() }
+            }
+        })
+        let coordinator = PinScreenshotCoordinator(action: { snapshot, action in
+            await actions.perform(snapshot, action: action)
+        })
+        coordinator.onFeedback = { [weak self] identity, feedback in
+            guard let self, let current = self.records[identity.captureID],
+                  current.revision == identity.revision, current.savedReference == identity.reference else { return }
+            self.pinFeedback[identity.captureID] = feedback.message
+        }
+        coordinator.onChange = { [weak self, weak coordinator] in
+            guard let self, let coordinator else { return }
+            self.pinItems = coordinator.items
+            self.pinManager.update(self.pinItems)
+        }
+        coordinator.onManagePins = { [weak self] in self?.showPins() }
+        coordinator.onOpenRecents = { [weak self] in self?.annotationRecents.show() }
+        coordinator.onCapacityReached = { [weak self] in self?.showPins() }
+        return coordinator
+    }
+    func showPin(_ id: UUID) { pinCoordinator.show(id) }
+    func closePin(_ id: UUID) { pinCoordinator.close(id) }
+    func closeAllPins() { pinCoordinator.closeAll() }
+    func showPins() {
+        pinManager.onShow = { [weak self] in self?.showPin($0) }
+        pinManager.onClose = { [weak self] in self?.closePin($0) }
+        pinManager.onCloseAll = { [weak self] in self?.closeAllPins() }
+        pinManager.update(pinItems); pinManager.show()
     }
 
     func currentAnnotationRequest() -> Task<Void, Never>? { annotationTask }

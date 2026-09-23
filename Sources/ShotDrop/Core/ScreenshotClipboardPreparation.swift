@@ -40,6 +40,18 @@ struct PreparedScreenshotClipboard: Sendable {
         self.fileState = fileState
     }
 
+    /// Explicit snapshot copy has no file URL and never retargets a changed pathname.
+    @concurrent
+    static func snapshotPNG(_ data: Data) async throws -> Self {
+        try Task.checkCancellation()
+        guard data.prefix(8).elementsEqual([137, 80, 78, 71, 13, 10, 26, 10]) else {
+            throw ScreenshotClipboardFailure(.invalidImage, "The pinned preview is not a PNG.")
+        }
+        _ = try ScreenshotTextImage(data: data)
+        try Task.checkCancellation()
+        return Self(mode: .image, pngData: data, fileURL: nil, fileState: nil)
+    }
+
     /// Revalidate off MainActor immediately before publication. A URL is a reference,
     /// not a promise against another process moving/removing a file after this check.
     @concurrent
