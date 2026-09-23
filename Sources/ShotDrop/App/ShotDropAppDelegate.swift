@@ -7,6 +7,7 @@ final class ShotDropAppDelegate: NSObject, NSApplicationDelegate {
     let settings = AppSettings()
     let launchAtLogin = LaunchAtLoginController()
     lazy var setupController = ShotDropSetupWindowController(settings: settings)
+    lazy var recentController = RecentMenuController(settings: settings)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)

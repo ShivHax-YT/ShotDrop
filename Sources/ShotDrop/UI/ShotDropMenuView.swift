@@ -4,29 +4,22 @@ import SwiftUI
 @MainActor
 struct ShotDropMenuView: View {
     @Environment(\.openSettings) private var openSettings
+    var controller: RecentMenuController
+    var preferredCopyMode: CopyMode
     var onFinishSetup: () -> Void
 
     var body: some View {
-        Text("ShotDrop")
-        Text("Setup needed")
-        Text("ShotDrop is not watching for screenshots.")
-            .foregroundStyle(.secondary)
-
-        Divider()
-
-        Button("Finish Setup…", action: onFinishSetup)
-
-        Button("Settings…") {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            openSettings()
-        }
-        .keyboardShortcut(",")
-
-        Divider()
-
-        Button("Quit ShotDrop") {
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
+        RecentMenuPanel(rows: controller.rows, status: controller.status,
+                        historyUnavailable: controller.historyUnavailable,
+                        preferredCopyMode: preferredCopyMode,
+                        onAction: controller.perform,
+                        onClearHistory: controller.clearHistory,
+                        onFinishSetup: onFinishSetup,
+                        onOpenSettings: {
+                            NSApplication.shared.activate(ignoringOtherApps: true)
+                            openSettings()
+                        },
+                        onPanelVisible: controller.panelVisible,
+                        onRowVisible: controller.rowVisible)
     }
 }

@@ -8,8 +8,11 @@ struct ShotDropApp: App {
 
     var body: some Scene {
         MenuBarExtra("ShotDrop", systemImage: "rectangle.on.rectangle") {
-            ShotDropMenuView(onFinishSetup: appDelegate.setupController.show)
+            ShotDropMenuView(controller: appDelegate.recentController,
+                             preferredCopyMode: appDelegate.settings.copyMode,
+                             onFinishSetup: appDelegate.setupController.show)
         }
+        .menuBarExtraStyle(.window)
 
         Settings {
             ShotDropSettingsView(settings: appDelegate.settings,
