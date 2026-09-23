@@ -1,0 +1,67 @@
+import AppKit
+import SwiftUI
+
+/// Owns one nonmodal setup window. Presentation never starts screenshot processing.
+@MainActor
+final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
+    let model: ShotDropSetupModel
+    private let settings: AppSettings
+    private var window: NSWindow?
+    private var initialDestinationPath: String?
+
+    init(settings: AppSettings) {
+        self.settings = settings
+        model = ShotDropSetupModel(destinationURL: URL(fileURLWithPath: settings.destinationPath,
+                                                      isDirectory: true))
+        super.init()
+    }
+
+    func show() {
+        if let window, window.isVisible {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let destination = URL(fileURLWithPath: settings.destinationPath, isDirectory: true)
+        if model.destinationURL != destination {
+            model.selectDestination(destination)
+        }
+        model.reopen()
+        initialDestinationPath = settings.destinationPath
+        settings.hasPresentedSetup = true
+        if window == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
+            window.title = "Set Up ShotDrop"
+            window.isReleasedWhenClosed = false
+            window.contentMinSize = NSSize(width: 360, height: 420)
+            window.delegate = self
+            window.contentView = NSHostingView(rootView: ShotDropSetupView(model: model) { [weak self] in
+                self?.window?.close()
+            })
+            window.center()
+            self.window = window
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // Closing the title-bar control is the same reversible deferral as Not Now.
+        if model.isPresented {
+            model.notNow()
+        }
+        if let destination = model.destinationURL,
+           settings.destinationPath == initialDestinationPath,
+           destination.path != initialDestinationPath {
+            settings.destinationPath = destination.path
+        }
+    }
+
+    func destinationChangedInSettings(_ destination: URL) {
+        // Settings and setup are nonmodal. A later explicit choice cancels any stale check.
+        model.selectDestination(destination)
+        initialDestinationPath = destination.path
+    }
+}

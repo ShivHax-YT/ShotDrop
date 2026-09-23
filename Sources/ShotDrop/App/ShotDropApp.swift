@@ -5,16 +5,17 @@ import SwiftUI
 @MainActor
 struct ShotDropApp: App {
     @NSApplicationDelegateAdaptor(ShotDropAppDelegate.self) private var appDelegate
-    @State private var settings = AppSettings()
-    @State private var launchAtLogin = LaunchAtLoginController()
 
     var body: some Scene {
         MenuBarExtra("ShotDrop", systemImage: "rectangle.on.rectangle") {
-            ShotDropMenuView()
+            ShotDropMenuView(onFinishSetup: appDelegate.setupController.show)
         }
 
         Settings {
-            ShotDropSettingsView(settings: settings, launchAtLogin: launchAtLogin)
+            ShotDropSettingsView(settings: appDelegate.settings,
+                                 launchAtLogin: appDelegate.launchAtLogin,
+                                 onFinishSetup: appDelegate.setupController.show,
+                                 onDestinationChange: appDelegate.setupController.destinationChangedInSettings)
         }
         .defaultSize(width: 520, height: 560)
     }

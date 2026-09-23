@@ -26,6 +26,7 @@ final class AppSettings {
         static let copyMode = "copyMode"
         static let organizeByDate = "organizeByDate"
         static let playSound = "playSound"
+        static let hasPresentedSetup = "hasPresentedSetup"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -50,6 +51,11 @@ final class AppSettings {
         didSet { defaults.set(playSound, forKey: Key.playSound) }
     }
 
+    /// Presentation history only; never evidence of access, enrollment, or readiness.
+    var hasPresentedSetup: Bool {
+        didSet { defaults.set(hasPresentedSetup, forKey: Key.hasPresentedSetup) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         destinationPath = defaults.string(forKey: Key.destinationPath)
@@ -59,5 +65,6 @@ final class AppSettings {
         copyMode = defaults.string(forKey: Key.copyMode).flatMap(CopyMode.init(rawValue:)) ?? .both
         organizeByDate = defaults.bool(forKey: Key.organizeByDate)
         playSound = defaults.bool(forKey: Key.playSound)
+        hasPresentedSetup = defaults.bool(forKey: Key.hasPresentedSetup)
     }
 }

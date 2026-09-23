@@ -5,6 +5,8 @@ import SwiftUI
 struct ShotDropSettingsView: View {
     @Bindable var settings: AppSettings
     @Bindable var launchAtLogin: LaunchAtLoginController
+    var onFinishSetup: () -> Void
+    var onDestinationChange: (URL) -> Void
 
     @State private var isChoosingFolder = false
 
@@ -15,6 +17,7 @@ struct ShotDropSettingsView: View {
                 Text("You can set your preferences now. Automatic copying and saving will arrive in a future build.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                Button("Finish Setup…", action: onFinishSetup)
             }
 
             Section("Saving") {
@@ -89,13 +92,13 @@ struct ShotDropSettingsView: View {
 
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose a Screenshot Folder"
+        panel.title = "Choose a Save Destination"
         panel.message = "ShotDrop will save screenshots in this folder when automatic saving is available."
         panel.prompt = "Choose"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
+        panel.canCreateDirectories = false
         panel.directoryURL = URL(fileURLWithPath: (settings.destinationPath as NSString).expandingTildeInPath)
         isChoosingFolder = true
 
@@ -103,6 +106,7 @@ struct ShotDropSettingsView: View {
             isChoosingFolder = false
             guard response == .OK, let url = panel.url else { return }
             settings.destinationPath = url.path
+            onDestinationChange(url)
         }
 
         if let window = NSApplication.shared.keyWindow {

@@ -13,6 +13,7 @@ final class AppSettingsTests: XCTestCase {
             XCTAssertEqual(settings.copyMode, .both)
             XCTAssertFalse(settings.organizeByDate)
             XCTAssertFalse(settings.playSound)
+            XCTAssertFalse(settings.hasPresentedSetup)
         }
     }
 
@@ -25,6 +26,7 @@ final class AppSettingsTests: XCTestCase {
             settings.copyMode = .file
             settings.organizeByDate = true
             settings.playSound = true
+            settings.hasPresentedSetup = true
 
             let reloaded = AppSettings(defaults: defaults)
             XCTAssertEqual(reloaded.destinationPath, settings.destinationPath)
@@ -32,6 +34,7 @@ final class AppSettingsTests: XCTestCase {
             XCTAssertEqual(reloaded.copyMode, .file)
             XCTAssertTrue(reloaded.organizeByDate)
             XCTAssertTrue(reloaded.playSound)
+            XCTAssertTrue(reloaded.hasPresentedSetup)
 
             reloaded.organizeByDate = false
             reloaded.playSound = false
