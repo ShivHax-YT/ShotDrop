@@ -4,6 +4,18 @@ import XCTest
 @testable import ShotDrop
 
 final class DefaultDestinationIssuerTests: XCTestCase {
+    func testNativeLocalCloudCheckEnrollsDefaultButKeepsLegacyLeaseGateClosed() throws {
+        let f = try Fixture(useRealCloudQuery: true, legacyAccountedFor: false)
+        defer { f.remove() }
+        let initial = try f.issuer.createAndEnroll(sourceDirectory: f.source, stagingRoot: f.staging)
+        let resumed = try f.issuer.resumeEnrolled(sourceDirectory: f.source, stagingRoot: f.staging)
+        XCTAssertEqual(initial.binding, resumed.binding)
+        XCTAssertEqual(try f.rootCount(), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.path))
+        XCTAssertThrowsError(try f.pool.lease(sourceDirectory: f.source, destinationDirectory: f.destination))
+        XCTAssertEqual(try Data(contentsOf: f.original), Data("original".utf8))
+    }
+
     func testCrashCheckpointsPreserveBoundedRecoveryAndSource() throws {
         for point in [DefaultDestinationIssuerCheckpoint.beforeIntent, .afterIntent, .afterCreation,
                       .afterCreatedReceipt, .afterRegistration] {
@@ -120,6 +132,7 @@ final class DefaultDestinationIssuerTests: XCTestCase {
 
     private struct Fixture {
         let root: URL
+        let useRealCloudQuery: Bool
         var accounts: URL { root.appendingPathComponent("Users") }
         var home: URL { accounts.appendingPathComponent("fixture") }
         var pictures: URL { home.appendingPathComponent("Pictures") }
@@ -130,23 +143,26 @@ final class DefaultDestinationIssuerTests: XCTestCase {
         var staging: URL { root.appendingPathComponent("staging") }
         var journal: DefaultDestinationJournal { .init(directory: root.appendingPathComponent("journal")) }
         var inspector: DefaultDestinationPolicyPathInspector {
-            .init(accountsRoot: accounts, accountName: "fixture", accountRecordHome: home,
+            var operations = DefaultDestinationPolicyOperations()
+            if !useRealCloudQuery { operations.isUbiquitous = { _ in false } }
+            return .init(accountsRoot: accounts, accountName: "fixture", accountRecordHome: home,
                   requestedHome: home, standardPictures: pictures,
-                  operations: .init(isUbiquitous: { _ in false }))
+                  operations: operations)
         }
         var pool: ScreenshotStagingPool {
             .init(registryDirectory: registry, defaultPolicyInspector: inspector)
         }
         var issuer: DefaultDestinationIssuer { .init(inspector: inspector, journal: journal, pool: pool) }
 
-        init() throws {
+        init(useRealCloudQuery: Bool = false, legacyAccountedFor: Bool = true) throws {
+            self.useRealCloudQuery = useRealCloudQuery
             root = try resolvedStagingTemporaryDirectory().appendingPathComponent("ShotDropIssuer-\(UUID())")
             for directory in [pictures, source, journal.directory] {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                         attributes: [.posixPermissions: 0o700])
             }
             try Data("original".utf8).write(to: original)
-            try pool.initialize(legacyArtifactsAccountedFor: true)
+            try pool.initialize(legacyArtifactsAccountedFor: legacyAccountedFor)
         }
 
         func rootCount() throws -> Int {

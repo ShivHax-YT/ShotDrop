@@ -50,6 +50,7 @@ final class ShotDropSetupModel {
     private(set) var isSourceLocationUnknown = false
     private(set) var defaultPreparationResult: DefaultDestinationPreparationResult?
     private(set) var isShowingSetupDetails = false
+    private(set) var alternateReadinessPaused = false
 
     @ObservationIgnored private let service: any ShotDropSetupAccessServing
     @ObservationIgnored private let gate: any ShotDropSetupReadinessGating
@@ -75,7 +76,10 @@ final class ShotDropSetupModel {
 
     var canGoBack: Bool { isPresented && step != .welcome }
     var showsPausedSetup: Bool {
-        step == .source && defaultPreparationResult.map { !$0.permitsRetry } == true
+        step == .source && (alternateReadinessPaused || defaultPreparationResult.map { !$0.permitsRetry } == true)
+    }
+    var pausedSetupMessage: String {
+        "Your selected folder is kept for review. Automatic copying and saving are not available in this build. Close setup and use Finish Setup… to return when an update is available."
     }
     var destinationStatusLabel: String {
         if canRunTest { return "Save copies to" }
@@ -93,7 +97,7 @@ final class ShotDropSetupModel {
     func dismissSetupDetails() { isShowingSetupDetails = false }
     var canContinue: Bool {
         guard isPresented, !isBusy else { return false }
-        if step == .source, let result = defaultPreparationResult, !result.permitsRetry { return false }
+        if showsPausedSetup { return false }
         switch step {
         case .welcome: return true
         case .destination: return destinationURL != nil
@@ -117,6 +121,7 @@ final class ShotDropSetupModel {
     func selectDestination(_ url: URL) {
         invalidate()
         defaultPreparationResult = nil
+        alternateReadinessPaused = false
         destinationURL = url
         destinationIssue = nil
         destinationNeedsReview = false
@@ -127,7 +132,9 @@ final class ShotDropSetupModel {
     /// Selection is a draft only. It neither changes macOS preferences nor proves this is its source.
     func selectSource(_ url: URL) {
         invalidate()
-        defaultPreparationResult = nil
+        // Changing a source cannot clear a durable destination review requirement.
+        if defaultPreparationResult?.permitsRetry == true { defaultPreparationResult = nil }
+        alternateReadinessPaused = false
         sourceURL = url
         sourceIssue = nil
         requiresSourceSelection = false
@@ -192,15 +199,26 @@ final class ShotDropSetupModel {
     func reopen() {
         dismissSetupDetails()
         invalidate()
-        defaultPreparationResult = nil
-        step = .welcome
+        step = defaultPreparationResult != nil || alternateReadinessPaused ? .source : .welcome
         isPresented = true
         isDeferred = false
         sourceConfirmedByUser = false
-        destinationNeedsReview = false
+        destinationNeedsReview = defaultPreparationResult != nil || alternateReadinessPaused
         sourceIssue = nil
         destinationIssue = nil
-        statusMessage = nil
+        statusMessage = defaultPreparationResult?.message ?? (alternateReadinessPaused ? pausedSetupMessage : nil)
+    }
+
+    /// Restores only review information; never enrolls, approves, or prepares a folder.
+    func restoreReviewState() async {
+        guard isPresented, !isBusy, proposesSupportedDefault, let defaultPreparer else { return }
+        let token = generation
+        let result = await defaultPreparer.reviewState()
+        guard isCurrent(token), !isBusy, let result else { return }
+        defaultPreparationResult = result
+        destinationNeedsReview = true
+        step = .source
+        statusMessage = result.message
     }
 
     private func perform(_ body: @escaping @MainActor (ShotDropSetupModel, UInt64) async -> Void) async {
@@ -313,7 +331,8 @@ final class ShotDropSetupModel {
         guard isCurrent(token) else { return }
         guard decision.permitsTest(for: binding) else {
             destinationNeedsReview = true
-            statusMessage = "Automatic copying and saving are not available in this build. Your save destination can be kept for later."
+            alternateReadinessPaused = true
+            statusMessage = pausedSetupMessage
             return
         }
         verifiedBinding = binding

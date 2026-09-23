@@ -12,8 +12,12 @@ final class ShotDropAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         logger.info("ShotDrop started. Screenshot processing remains inactive pending setup and pipeline acceptance.")
-        if !settings.hasPresentedSetup {
+        if settings.shouldPresentSetupOnLaunch {
             setupController.show()
         }
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        setupController.show()
+        return true
     }
 }

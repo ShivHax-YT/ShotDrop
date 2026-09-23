@@ -14,6 +14,9 @@ final class AppSettingsTests: XCTestCase {
             XCTAssertFalse(settings.organizeByDate)
             XCTAssertFalse(settings.playSound)
             XCTAssertFalse(settings.hasPresentedSetup)
+            XCTAssertFalse(settings.hasCompletedSetup)
+            XCTAssertFalse(settings.hasDeferredSetup)
+            XCTAssertTrue(settings.shouldPresentSetupOnLaunch)
             XCTAssertTrue(settings.showShotDropThumbnail)
         }
     }
@@ -59,6 +62,89 @@ final class AppSettingsTests: XCTestCase {
             let settings = AppSettings(defaults: defaults)
             XCTAssertEqual(settings.copyMode, .both)
             XCTAssertEqual(settings.renameTemplate, "{date}")
+        }
+    }
+
+    @MainActor
+    func testPreviouslyPresentedIncompleteSetupStillAppearsOnLaunchWithoutResettingPreferences() async throws {
+        try withDefaults { defaults in
+            defaults.set(true, forKey: AppSettings.Key.hasPresentedSetup)
+            defaults.set("/tmp/User Selected Destination", forKey: AppSettings.Key.destinationPath)
+            defaults.set("{date} screenshot", forKey: AppSettings.Key.renameTemplate)
+            defaults.set(CopyMode.file.rawValue, forKey: AppSettings.Key.copyMode)
+            defaults.set(false, forKey: AppSettings.Key.showShotDropThumbnail)
+            let settings = AppSettings(defaults: defaults)
+            XCTAssertTrue(settings.hasPresentedSetup)
+            XCTAssertFalse(settings.hasCompletedSetup)
+            XCTAssertFalse(settings.hasDeferredSetup)
+            XCTAssertTrue(settings.shouldPresentSetupOnLaunch)
+            settings.hasPresentedSetup = true
+            let reopened = AppSettings(defaults: defaults)
+            XCTAssertTrue(reopened.shouldPresentSetupOnLaunch)
+            XCTAssertEqual(reopened.destinationPath, "/tmp/User Selected Destination")
+            XCTAssertEqual(reopened.renameTemplate, "{date} screenshot")
+            XCTAssertEqual(reopened.copyMode, .file)
+            XCTAssertFalse(reopened.showShotDropThumbnail)
+        }
+    }
+
+    @MainActor
+    func testOnlyExplicitCompletionSuppressesAutomaticSetupPresentation() async throws {
+        try withDefaults { defaults in
+            let settings = AppSettings(defaults: defaults)
+            settings.hasPresentedSetup = true
+            XCTAssertTrue(settings.shouldPresentSetupOnLaunch)
+            settings.recordSetupCompletion(ifTerminalSuccess: false)
+            XCTAssertTrue(settings.shouldPresentSetupOnLaunch)
+            settings.recordSetupCompletion(ifTerminalSuccess: true)
+            XCTAssertTrue(settings.hasCompletedSetup)
+            XCTAssertFalse(settings.shouldPresentSetupOnLaunch)
+            let reloaded = AppSettings(defaults: defaults)
+            XCTAssertTrue(reloaded.hasCompletedSetup)
+            XCTAssertFalse(reloaded.shouldPresentSetupOnLaunch)
+            XCTAssertTrue(reloaded.hasPresentedSetup)
+        }
+    }
+
+    @MainActor
+    func testExplicitDeferralPersistsWithoutClaimingCompletionAndReopenClearsIt() async throws {
+        try withDefaults { defaults in
+            let settings = AppSettings(defaults: defaults)
+            settings.hasPresentedSetup = true
+            settings.destinationPath = "/tmp/Kept Choice"
+            settings.recordSetupDeferral()
+            XCTAssertTrue(settings.hasDeferredSetup)
+            XCTAssertFalse(settings.hasCompletedSetup)
+            XCTAssertFalse(settings.shouldPresentSetupOnLaunch)
+            let deferred = AppSettings(defaults: defaults)
+            XCTAssertTrue(deferred.hasDeferredSetup)
+            XCTAssertFalse(deferred.hasCompletedSetup)
+            XCTAssertFalse(deferred.shouldPresentSetupOnLaunch)
+            deferred.resumeSetupPresentation()
+            let reopened = AppSettings(defaults: defaults)
+            XCTAssertFalse(reopened.hasDeferredSetup)
+            XCTAssertFalse(reopened.hasCompletedSetup)
+            XCTAssertTrue(reopened.shouldPresentSetupOnLaunch)
+            XCTAssertEqual(reopened.destinationPath, "/tmp/Kept Choice")
+        }
+    }
+
+    @MainActor
+    func testCompletionClearsDeferralButReopeningDoesNotClearCompletion() async throws {
+        try withDefaults { defaults in
+            let settings = AppSettings(defaults: defaults)
+            settings.recordSetupDeferral()
+            settings.recordSetupCompletion(ifTerminalSuccess: false)
+            XCTAssertTrue(settings.hasDeferredSetup)
+            XCTAssertFalse(settings.hasCompletedSetup)
+            settings.recordSetupCompletion(ifTerminalSuccess: true)
+            XCTAssertFalse(settings.hasDeferredSetup)
+            XCTAssertTrue(settings.hasCompletedSetup)
+            settings.resumeSetupPresentation()
+            let reopened = AppSettings(defaults: defaults)
+            XCTAssertTrue(reopened.hasCompletedSetup)
+            XCTAssertFalse(reopened.hasDeferredSetup)
+            XCTAssertFalse(reopened.shouldPresentSetupOnLaunch)
         }
     }
 

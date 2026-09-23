@@ -38,7 +38,7 @@ struct DefaultDestinationPolicyOperations: Sendable {
     }
     /// `false` is an explicit negative result. Unknown and errors fail closed.
     var isUbiquitous: @Sendable (URL) throws -> Bool? = {
-        try $0.resourceValues(forKeys: [.isUbiquitousItemKey]).isUbiquitousItem
+        try DefaultDestinationUbiquityEvidence.inspect($0)
     }
     /// Nil selects Main's approved ordinary-home support assumption, after the exact path,
     /// volume and iCloud gates. It is not a measured negative provider result. If a caller
@@ -53,6 +53,31 @@ struct DefaultDestinationPolicyOperations: Sendable {
         guard evidence == false else {
             throw evidence == true ? DefaultDestinationPolicyIssue.unsupported : .providerStatusUnknown
         }
+    }
+}
+
+/// FileManager supplies an explicit Boolean for iCloud targeting; the optional URL
+/// resource value can be absent for an ordinary local directory. A false Boolean
+/// also describes a missing item, so require the same existing no-follow directory
+/// on both sides of that path-based query. This is not provider-management evidence.
+enum DefaultDestinationUbiquityEvidence {
+    static func inspect(_ url: URL,
+                        query: (URL) throws -> Bool = { FileManager.default.isUbiquitousItem(at: $0) }) throws -> Bool {
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost",
+              !url.path.contains("\0") else { throw DefaultDestinationPolicyIssue.unsafePath }
+        let held = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
+        guard held >= 0 else { throw DefaultDestinationPolicyIssue.cloudStatusUnknown }
+        defer { close(held) }
+        let identity = try DefaultDestinationDirectoryIdentity(held)
+        let result = try query(url)
+        let current = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC | O_NONBLOCK)
+        guard current >= 0 else { throw DefaultDestinationPolicyIssue.changed }
+        defer { close(current) }
+        guard try DefaultDestinationDirectoryIdentity(current) == identity,
+              try DefaultDestinationDirectoryIdentity(held) == identity else {
+            throw DefaultDestinationPolicyIssue.changed
+        }
+        return result
     }
 }
 

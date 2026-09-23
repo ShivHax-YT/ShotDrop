@@ -18,6 +18,10 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        settings.resumeSetupPresentation()
+        // Setup is a first-run task with a discoverable Dock presence while open.
+        // Closing returns ShotDrop to its normal menu-bar-only presentation.
+        NSApplication.shared.setActivationPolicy(.regular)
         if let window, window.isVisible {
             NSApplication.shared.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
@@ -28,15 +32,16 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
             model.selectDestination(destination)
         }
         model.reopen()
+        Task { await model.restoreReviewState() }
         initialDestinationPath = settings.destinationPath
         settings.hasPresentedSetup = true
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                   backing: .buffered, defer: false)
             window.title = "Set Up ShotDrop"
             window.isReleasedWhenClosed = false
-            window.contentMinSize = NSSize(width: 360, height: 420)
+            window.contentMinSize = NSSize(width: 420, height: 440)
             window.delegate = self
             window.contentView = NSHostingView(rootView: ShotDropSetupView(model: model) { [weak self] in
                 self?.window?.close()
@@ -49,10 +54,14 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        settings.recordSetupCompletion(ifTerminalSuccess:
+            model.step == .test && !model.isPresented && !model.isDeferred)
+        NSApplication.shared.setActivationPolicy(.accessory)
         // Closing the title-bar control is the same reversible deferral as Not Now.
         if model.isPresented {
             model.notNow()
         }
+        if model.isDeferred { settings.recordSetupDeferral() }
         if let destination = model.destinationURL,
            settings.destinationPath == initialDestinationPath,
            destination.path != initialDestinationPath {

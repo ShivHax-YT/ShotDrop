@@ -90,6 +90,39 @@ struct DefaultDestinationJournal: Sendable {
         try withLock { fd in try read(fd) }
     }
 
+    /// A review-only snapshot: never creates a directory, lock, pending file, or receipt.
+    /// Existing writers are excluded with their shared lock; orphaned journal evidence
+    /// without its lock is uncertain and cannot be treated as an empty installation.
+    func loadReadOnly() throws -> State {
+        guard directory.isFileURL, Self.isAbsoluteClean(directory.path) else { throw Fault.invalidBinding }
+        let fd = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == ENOENT { return .empty }
+            throw Fault.unavailable
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { throw Fault.unavailable }
+        let lockFD = openat(fd, "default-destination.lock", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard lockFD >= 0 else {
+            guard errno == ENOENT else { throw Fault.unavailable }
+            // No synchronized read is possible without the existing lock. Only a
+            // genuinely absent receipt and pending write count as empty state.
+            for name in ["default-destination.pending", "default-destination.json"] {
+                if fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 { throw Fault.corruptOrUnsupported }
+                guard errno == ENOENT else { throw Fault.unavailable }
+            }
+            return .empty
+        }
+        defer { close(lockFD) }
+        guard fstat(lockFD, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              info.st_uid == geteuid(), info.st_nlink == 1, info.st_mode & 0o077 == 0,
+              flock(lockFD, LOCK_SH | LOCK_NB) == 0 else { throw Fault.unavailable }
+        defer { flock(lockFD, LOCK_UN) }
+        return try read(fd)
+    }
+
     /// Must complete (including fsync) before the caller attempts mkdir. Only an empty journal
     /// accepts an intent. A previous intent or receipt is never reset automatically.
     func begin(_ intent: Intent) throws {

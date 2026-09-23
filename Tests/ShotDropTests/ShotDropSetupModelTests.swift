@@ -7,9 +7,50 @@ final class ShotDropSetupModelTests: XCTestCase {
     private let source = URL(fileURLWithPath: "/fixture/source", isDirectory: true)
     private let destination = URL(fileURLWithPath: "/fixture/destination", isDirectory: true)
 
+    func testAlternateUnavailableReadinessHasStableDetailsAndSurvivesDeferral() async {
+        let service = SetupServiceFixture()
+        let gate = SetupGateFixture(destination: false, pipeline: false, review: false)
+        let model = await sourceStep(service: service, gate: gate)
+        await model.continueSetup()
+        XCTAssertTrue(model.showsPausedSetup)
+        XCTAssertFalse(model.canContinue)
+        XCTAssertFalse(model.canRunTest)
+        model.showSetupDetails()
+        XCTAssertTrue(model.isShowingSetupDetails)
+        let before = await service.calls
+        await model.continueSetup()
+        model.notNow(); model.reopen()
+        XCTAssertTrue(model.showsPausedSetup)
+        XCTAssertEqual(model.statusMessage, model.pausedSetupMessage)
+        await model.continueSetup()
+        let after = await service.calls
+        XCTAssertEqual(before, after)
+        let count = await gate.count
+        XCTAssertEqual(count, 1)
+        XCTAssertFalse(model.canRunTest)
+    }
+
+    func testDurableReviewRestoreNeverPreparesOrApprovesAndSurvivesReopen() async {
+        for result in [DefaultDestinationPreparationResult.reviewRequired, .enrolledPaused, .reservedRecovery] {
+            let preparer = SetupDefaultPreparerFixture(proposedDestination: destination, result: result, reviewResult: result)
+            let model = ShotDropSetupModel(destinationURL: destination, defaultPreparer: preparer)
+            await model.restoreReviewState()
+            XCTAssertEqual(model.defaultPreparationResult, result)
+            XCTAssertTrue(model.showsPausedSetup)
+            XCTAssertFalse(model.canRunTest)
+            model.notNow(); model.reopen()
+            XCTAssertEqual(model.defaultPreparationResult, result)
+            await model.continueSetup()
+            let count = await preparer.count
+            XCTAssertEqual(count, 0)
+            XCTAssertFalse(model.canRunTest)
+        }
+    }
+
     func testDefaultPreparationRequiresConfirmationAndAlwaysKeepsProcessingPaused() async {
         for result in [DefaultDestinationPreparationResult.enrolledPaused, .reviewRequired,
-                       .reservedRecovery, .unreservedRecovery, .missingPictures, .unsupported, .retryable] {
+                       .reservedRecovery, .unreservedRecovery, .missingPictures, .unsupported, .retryable,
+                       .cloudStatusUnknown, .providerStatusUnknown] {
             let preparer = SetupDefaultPreparerFixture(proposedDestination: destination, result: result)
             let model = ShotDropSetupModel(destinationURL: destination, service: SetupServiceFixture(),
                                            gate: SetupGateFixture.approved, defaultPreparer: preparer)
@@ -24,6 +65,9 @@ final class ShotDropSetupModelTests: XCTestCase {
             let after = await preparer.count
             XCTAssertEqual(after, 1)
             XCTAssertEqual(model.defaultPreparationResult, result)
+            XCTAssertEqual(model.statusMessage, result.message)
+            if result == .cloudStatusUnknown { XCTAssertTrue(model.statusMessage?.contains("iCloud") == true) }
+            if result == .providerStatusUnknown { XCTAssertTrue(model.statusMessage?.contains("storage provider") == true) }
             XCTAssertEqual(model.canContinue, result.permitsRetry)
             XCTAssertEqual(model.showsPausedSetup, !result.permitsRetry)
             let expectedLabel: String
@@ -188,7 +232,7 @@ final class ShotDropSetupModelTests: XCTestCase {
 
     func testReopenRechecksPreferencesWithoutSilentlyAdoptingAnExtantNewSource() async {
         let service = SetupServiceFixture()
-        let model = await sourceStep(service: service)
+        let model = await sourceStep(service: service, gate: SetupGateFixture.approved)
         await model.continueSetup()
         let moved = URL(fileURLWithPath: "/fixture/new-source")
         await service.setDiscovery(.known(moved))
@@ -236,8 +280,10 @@ final class ShotDropSetupModelTests: XCTestCase {
 
     func testUnavailablePreviouslyCheckedSourceCanRetrySameIdentityWithoutRetargeting() async {
         let service = SetupServiceFixture()
-        let model = await sourceStep(service: service)
+        let model = await sourceStep(service: service, gate: SetupGateFixture.approved)
         await model.continueSetup()
+        model.goBack()
+        model.confirmCurrentSource(true)
         await service.setSourceFailure(.changed)
         await model.continueSetup()
         XCTAssertEqual(model.sourceIssue, .changed)
@@ -248,7 +294,7 @@ final class ShotDropSetupModelTests: XCTestCase {
         let identities = await service.expectations
         XCTAssertEqual(identities.last!, SetupServiceFixture.identity(source))
         XCTAssertEqual(model.sourceURL, source)
-        XCTAssertFalse(model.canRunTest)
+        XCTAssertTrue(model.canRunTest)
     }
 
     func testDeniedSourceCannotReachGateAndCanRetry() async {
@@ -379,7 +425,7 @@ final class ShotDropSetupModelTests: XCTestCase {
 
     func testPreviousSourceIdentitySurvivesReopenUntilExplicitReselection() async {
         let service = SetupServiceFixture()
-        let model = await sourceStep(service: service)
+        let model = await sourceStep(service: service, gate: SetupGateFixture.approved)
         model.confirmCurrentSource(true)
         await model.continueSetup()
         model.reopen()
@@ -419,12 +465,15 @@ final class ShotDropSetupModelTests: XCTestCase {
 private actor SetupDefaultPreparerFixture: DefaultDestinationSetupPreparing {
     nonisolated let proposedDestination: URL
     let result: DefaultDestinationPreparationResult
+    let reviewResult: DefaultDestinationPreparationResult?
     var count = 0
 
-    init(proposedDestination: URL, result: DefaultDestinationPreparationResult) {
+    init(proposedDestination: URL, result: DefaultDestinationPreparationResult, reviewResult: DefaultDestinationPreparationResult? = nil) {
         self.proposedDestination = proposedDestination
         self.result = result
+        self.reviewResult = reviewResult
     }
+    func reviewState() async -> DefaultDestinationPreparationResult? { reviewResult }
 
     func prepare(source: ShotDropSetupDirectoryIdentity) async -> DefaultDestinationPreparationResult {
         count += 1

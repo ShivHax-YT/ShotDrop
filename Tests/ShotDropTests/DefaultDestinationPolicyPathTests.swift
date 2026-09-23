@@ -67,6 +67,41 @@ final class DefaultDestinationPolicyPathTests: XCTestCase {
         }
     }
 
+    func testRealLocalUbiquityQuerySuppliesExplicitNegativeForExistingDirectory() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        XCTAssertFalse(try DefaultDestinationUbiquityEvidence.inspect(fixture.pictures))
+        let inspector = fixture.inspector(cloud: { try DefaultDestinationUbiquityEvidence.inspect($0) })
+        try inspector.withInspectedParent { fd, parent in
+            try inspector.revalidate(parent, parentDescriptor: fd)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: parent.childPath.path))
+        }
+    }
+
+    func testUbiquityQueryDoesNotMistakeMissingOrSymlinkForLocalDirectory() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let absent = fixture.root.appendingPathComponent("absent")
+        XCTAssertThrowsError(try DefaultDestinationUbiquityEvidence.inspect(absent, query: { _ in
+            XCTFail("Missing items must never reach the Boolean query")
+            return false
+        }))
+        let link = fixture.root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: fixture.pictures)
+        XCTAssertThrowsError(try DefaultDestinationUbiquityEvidence.inspect(link))
+    }
+
+    func testUbiquityQueryRejectsReplacementAndPropagatesFailureOrPositiveEvidence() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        XCTAssertTrue(try DefaultDestinationUbiquityEvidence.inspect(fixture.pictures, query: { _ in true }))
+        XCTAssertThrowsError(try DefaultDestinationUbiquityEvidence.inspect(fixture.pictures, query: { _ in
+            throw DefaultDestinationPolicyIssue.cloudStatusUnknown
+        }))
+        XCTAssertThrowsError(try DefaultDestinationUbiquityEvidence.inspect(fixture.pictures, query: { url in
+            try FileManager.default.moveItem(at: url, to: fixture.home.appendingPathComponent("Pictures-old"))
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            return false
+        })) { XCTAssertEqual($0 as? DefaultDestinationPolicyIssue, .changed) }
+    }
+
     func testMissingPicturesAndRedirectedHomeFailClosed() throws {
         let missing = try Fixture(picturesExists: false); defer { missing.remove() }
         XCTAssertThrowsError(try missing.inspector().withInspectedParent { _, _ in }) { XCTAssertEqual($0 as? DefaultDestinationPolicyIssue, .missingPictures) }

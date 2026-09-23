@@ -3,6 +3,7 @@ import Foundation
 
 enum DefaultDestinationPreparationResult: Sendable, Equatable {
     case enrolledPaused, reviewRequired, reservedRecovery, unreservedRecovery, missingPictures, unsupported, retryable
+    case cloudStatusUnknown, providerStatusUnknown
 
     var message: String {
         switch self {
@@ -20,10 +21,14 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
             "The default folder cannot be safely prepared on this setup. Saving is paused and your original screenshots stay in place."
         case .retryable:
             "The default folder could not be checked. Restore access or availability, then retry the check. Saving remains paused."
+        case .cloudStatusUnknown:
+            "ShotDrop could not confirm whether this folder is stored in iCloud. Keep the folder in place and retry when it is accessible. Saving remains paused."
+        case .providerStatusUnknown:
+            "ShotDrop could not confirm whether another storage provider manages this folder. Keep the folder in place and retry when it is accessible. Saving remains paused."
         }
     }
 
-    var permitsRetry: Bool { self == .retryable || self == .missingPictures }
+    var permitsRetry: Bool { self == .retryable || self == .missingPictures || self == .cloudStatusUnknown || self == .providerStatusUnknown }
 
     var detailsActionTitle: String { self == .unsupported ? "View Requirements…" : "View Setup Details…" }
 
@@ -34,7 +39,7 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
         case .reservedRecovery: "Storage reservation needs review"
         case .unreservedRecovery: "Created folder needs review"
         case .unsupported: "Default location unavailable"
-        case .missingPictures, .retryable: "Check paused"
+        case .missingPictures, .retryable, .cloudStatusUnknown, .providerStatusUnknown: "Check paused"
         }
     }
 
@@ -54,6 +59,8 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
             "Restore your Pictures folder, then return to setup and retry the check."
         case .retryable:
             "Restore folder access or availability, then return to setup and retry the check."
+        case .cloudStatusUnknown, .providerStatusUnknown:
+            "Retry the check when the folder is accessible. If the same message persists, close setup and ask ShotDrop’s developer to review the location check. Do not move or delete folders to clear this message."
         }
     }
 }
@@ -61,11 +68,29 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
 protocol DefaultDestinationSetupPreparing: Sendable {
     var proposedDestination: URL { get }
     func prepare(source: ShotDropSetupDirectoryIdentity) async -> DefaultDestinationPreparationResult
+    func reviewState() async -> DefaultDestinationPreparationResult?
+}
+
+extension DefaultDestinationSetupPreparing {
+    func reviewState() async -> DefaultDestinationPreparationResult? { nil }
 }
 
 struct LocalDefaultDestinationSetupPreparation: DefaultDestinationSetupPreparing {
     var proposedDestination: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/ShotDrop")
+    }
+
+    @concurrent
+    func reviewState() async -> DefaultDestinationPreparationResult? {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/com.macfleet.shotdrop/DefaultDestination")
+        do {
+            switch try DefaultDestinationJournal(directory: directory).loadReadOnly() {
+            case .empty: return nil
+            case .enrolled: return .enrolledPaused
+            case .intent, .created: return .reviewRequired
+            }
+        } catch { return .reviewRequired }
     }
 
     @concurrent
@@ -120,7 +145,8 @@ struct LocalDefaultDestinationSetupPreparation: DefaultDestinationSetupPreparing
         } catch let issue as DefaultDestinationPolicyIssue {
             switch issue {
             case .missingPictures: return .missingPictures
-            case .cloudStatusUnknown, .providerStatusUnknown: return .retryable
+            case .cloudStatusUnknown: return .cloudStatusUnknown
+            case .providerStatusUnknown: return .providerStatusUnknown
             case .changed: return .reviewRequired
             default: return .unsupported
             }

@@ -27,6 +27,8 @@ final class AppSettings {
         static let organizeByDate = "organizeByDate"
         static let playSound = "playSound"
         static let hasPresentedSetup = "hasPresentedSetup"
+        static let hasCompletedSetup = "hasCompletedSetup"
+        static let hasDeferredSetup = "hasDeferredSetup"
         static let showShotDropThumbnail = "showShotDropThumbnail"
     }
 
@@ -57,6 +59,31 @@ final class AppSettings {
         didSet { defaults.set(hasPresentedSetup, forKey: Key.hasPresentedSetup) }
     }
 
+    /// Completing the gated setup flow is distinct from showing or deferring it.
+    /// This preference is presentation history, never authority to start processing.
+    private(set) var hasCompletedSetup: Bool {
+        didSet { defaults.set(hasCompletedSetup, forKey: Key.hasCompletedSetup) }
+    }
+
+    /// Explicit Not Now/title-bar deferral suppresses automatic presentation, not readiness checks.
+    private(set) var hasDeferredSetup: Bool {
+        didSet { defaults.set(hasDeferredSetup, forKey: Key.hasDeferredSetup) }
+    }
+
+    var shouldPresentSetupOnLaunch: Bool { !hasCompletedSetup && !hasDeferredSetup }
+
+    func recordSetupDeferral() { hasDeferredSetup = true }
+
+    /// An explicit Finish Setup/reopen action resumes presentation without claiming completion.
+    func resumeSetupPresentation() { hasDeferredSetup = false }
+
+    /// Called only when the setup model reports its explicit completed state.
+    func recordSetupCompletion(ifTerminalSuccess completed: Bool) {
+        guard completed else { return }
+        hasCompletedSetup = true
+        hasDeferredSetup = false
+    }
+
     var showShotDropThumbnail: Bool {
         didSet { defaults.set(showShotDropThumbnail, forKey: Key.showShotDropThumbnail) }
     }
@@ -71,6 +98,9 @@ final class AppSettings {
         organizeByDate = defaults.bool(forKey: Key.organizeByDate)
         playSound = defaults.bool(forKey: Key.playSound)
         hasPresentedSetup = defaults.bool(forKey: Key.hasPresentedSetup)
+        // An older installation having displayed setup never implies completion.
+        hasCompletedSetup = defaults.bool(forKey: Key.hasCompletedSetup)
+        hasDeferredSetup = defaults.bool(forKey: Key.hasDeferredSetup)
         showShotDropThumbnail = defaults.object(forKey: Key.showShotDropThumbnail) as? Bool ?? true
     }
 }

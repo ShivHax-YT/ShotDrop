@@ -29,11 +29,19 @@ struct ShotDropSetupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.on.rectangle")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
+                Text("ShotDrop").font(.headline)
+                Spacer()
+                Text("Setup").font(.subheadline).foregroundStyle(.secondary)
+            }
+            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Step \(model.step.rawValue + 1) of 4")
-                        .font(.system(size: pathSize))
-                        .foregroundStyle(.secondary)
+                    setupProgress
                     Text(title)
                         .font(.system(size: titleSize, weight: .semibold))
                         .fixedSize(horizontal: false, vertical: true)
@@ -55,6 +63,12 @@ struct ShotDropSetupView: View {
                     if hasAccessDenial {
                         accessRecovery
                     }
+                    if model.destinationIssue != nil, model.step == .source {
+                        Button("Choose Another Save Folder…") { chooseFolder(.destinationPicker) }
+                            .disabled(model.isBusy || choosingFolder)
+                            .focused($keyboardFocus, equals: .destinationPicker)
+                            .accessibilityIdentifier("setup.recoverDestination")
+                    }
                     if model.isBusy {
                         ProgressView("Checking folder access…")
                             .controlSize(.small)
@@ -68,6 +82,14 @@ struct ShotDropSetupView: View {
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.step)
 
+            if let hint = nextActionHint {
+                Text(hint)
+                    .font(.system(size: pathSize))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setup.nextActionHint")
+            }
+            Divider()
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) {
                     secondaryActions
@@ -88,21 +110,32 @@ struct ShotDropSetupView: View {
         .background(SetupWindowReader(reference: windowReference).frame(width: 0, height: 0))
         .onAppear { focusCurrentStep() }
         .onChange(of: model.step) { _, _ in focusCurrentStep() }
-        .onChange(of: model.defaultPreparationResult) { _, _ in
-            if model.showsPausedSetup { keyboardFocus = .primary }
+        .onChange(of: model.showsPausedSetup) { _, paused in
+            if paused {
+                keyboardFocus = .primary
+                accessibilityFocus = .heading(model.step.rawValue)
+            }
         }
         .onChange(of: model.isBusy) { _, busy in
             if !busy, needsStepKeyboardFocus { focusStepControl() }
             if !busy, let message = recoveryMessage ?? model.statusMessage,
                let window = windowReference.window {
-                let nextAction = model.sourceIssue != nil
-                    ? (model.sourceIssue == .denied ? "Open System Settings" : "Select Current Screenshot Folder")
-                    : (model.showsPausedSetup ? model.defaultPreparationResult?.detailsActionTitle ?? "" : model.primaryTitle)
+                let nextAction: String
+                if model.showsPausedSetup {
+                    nextAction = model.defaultPreparationResult?.detailsActionTitle ?? "View Setup Details"
+                } else if let issue = model.destinationIssue {
+                    nextAction = issue == .denied ? "Open System Settings" : "Choose Another Save Folder"
+                } else if model.sourceIssue != nil {
+                    nextAction = model.sourceIssue == .denied ? "Open System Settings" : "Select Current Screenshot Folder"
+                } else { nextAction = model.primaryTitle }
                 NSAccessibility.post(element: window, notification: .announcementRequested,
                                      userInfo: [.announcement: "\(message) \(nextAction)",
                                                 .priority: NSAccessibilityPriorityLevel.high.rawValue])
             }
-            if !busy, model.sourceIssue != nil {
+            if !busy, model.showsPausedSetup { keyboardFocus = .primary }
+            else if !busy, model.destinationIssue != nil {
+                keyboardFocus = model.destinationIssue == .denied ? .accessRecovery : .destinationPicker
+            } else if !busy, model.sourceIssue != nil {
                 keyboardFocus = model.sourceIssue == .denied ? .accessRecovery : .sourcePicker
             }
         }
@@ -118,9 +151,56 @@ struct ShotDropSetupView: View {
         .accessibilityAction(.escape) { deferSetup() }
     }
 
+    private var setupProgress: some View {
+        let names = ["Welcome", "Save location", "Screenshot folder", model.canRunTest ? "Verify" : "Verify (unavailable)"]
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Step \(model.step.rawValue + 1) of 4 · \(names[model.step.rawValue])")
+                .font(.system(size: pathSize, weight: .medium))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                ForEach(0..<4) { index in
+                    Capsule()
+                        .fill(index == model.step.rawValue ? Color.accentColor : Color(nsColor: .separatorColor))
+                        .frame(height: 4)
+                }
+            }
+            .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("setup.stepProgress")
+    }
+
+    private var nextActionHint: String? {
+        if choosingFolder { return "Choose a folder in the dialog, or cancel to return to setup." }
+        if model.isBusy { return "Checking the selected folders. You can choose Not Now to stop setup." }
+        if model.showsPausedSetup { return "Open setup details to see what needs attention. Saving remains paused." }
+        if model.step == .source, !model.canContinue {
+            if model.requiresSourceSelection || model.sourceURL == nil {
+                return "Select the current screenshot folder to continue."
+            }
+            if !model.sourceConfirmedByUser { return "Confirm that this matches macOS’s Save to folder to continue." }
+        }
+        if model.step == .test, !model.canRunTest { return "Verification is unavailable until the remaining saving checks pass. You can return later from the ShotDrop menu." }
+        return nil
+    }
+
+    private func welcomeItem(_ title: String, symbol: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .frame(width: 22)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).fontWeight(.medium)
+                paragraph(detail).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private var title: String {
         switch model.step {
-        case .welcome: "Prepare your screenshot folders"
+        case .welcome: "Welcome to ShotDrop"
         case .destination: "Where should screenshots go?"
         case .source:
             if model.showsPausedSetup { "Saving is paused" }
@@ -135,14 +215,22 @@ struct ShotDropSetupView: View {
     private var stepContent: some View {
         switch model.step {
         case .welcome:
-            paragraph("ShotDrop is designed to copy each screenshot and save it in your chosen folder, so it is ready to paste and easy to find.")
-            paragraph("Automatic copying and saving are not available in this build. You can keep your save destination for later.")
-            paragraph("Your original screenshots stay where they are. You can return to setup from the ShotDrop menu.")
-                .foregroundStyle(.secondary)
+            paragraph("Set up a home for your screenshots. ShotDrop is designed to keep a saved copy ready to find and an image ready to paste.")
+            VStack(alignment: .leading, spacing: 12) {
+                welcomeItem("Choose where copies belong", symbol: "folder", detail: "Select a destination you can find easily.")
+                welcomeItem("Confirm your screenshot folder", symbol: "viewfinder", detail: "Match the folder macOS uses, then check access.")
+                welcomeItem("Keep your originals", symbol: "doc.on.doc", detail: "Setup leaves your original screenshots in place.")
+            }
+            .padding(16)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+            Label {
+                paragraph("Automatic copying and saving are paused in this build. You can prepare your folders now and return to setup from the ShotDrop menu.")
+            } icon: { Image(systemName: "pause.circle") }
+            .accessibilityIdentifier("setup.welcomeAvailability")
         case .destination:
             paragraph(model.proposesSupportedDefault
-                ? "Pictures/ShotDrop is the proposed default on supported local setups. After you confirm the screenshot source, ShotDrop can check and prepare this folder. Saving stays paused until the remaining setup checks and automatic processing are complete."
-                : "This folder is selected for review. Choosing it does not approve automatic saving. ShotDrop will check access when you continue; macOS may ask for permission.")
+                ? "Use Pictures/ShotDrop or choose another folder for saved copies. The default folder is prepared only after you confirm your screenshot source and the checks pass."
+                : "Choose an existing folder for saved copies. Continue to check access; macOS may ask for permission. Automatic saving stays paused until setup is ready.")
             if let destination = model.destinationURL {
                 path(destination, label: model.destinationStatusLabel)
             }
@@ -155,7 +243,19 @@ struct ShotDropSetupView: View {
             paragraph("The folder picker opens only when you choose it. No new folder is created by this step.")
                 .foregroundStyle(.secondary)
         case .source:
-            paragraph("Press Shift–Command–5, then look in Options > Save to. Confirm that the folder below is where macOS currently saves your screenshots.")
+            if model.showsPausedSetup {
+                paragraph(model.defaultPreparationResult?.message ?? model.pausedSetupMessage)
+                if let destination = model.destinationURL { path(destination, label: model.destinationStatusLabel) }
+                paragraph("Open setup details for the next step. You can use Back to review your folders, or Not Now to return to the menu.")
+                    .foregroundStyle(.secondary)
+            } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Press Shift–Command–5", systemImage: "keyboard")
+                    .fontWeight(.medium)
+                paragraph("Open Options, then look under Save to. Select that same folder below and confirm it before checking access.")
+            }
+            .padding(12)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             if model.proposesSupportedDefault {
                 paragraph("Prepare Default Folder may create Pictures/ShotDrop after its checks pass. Existing or interrupted setup folders are kept for review. Your originals stay in place.")
             }
@@ -193,6 +293,7 @@ struct ShotDropSetupView: View {
             if let destination = model.destinationURL {
                 path(destination, label: model.destinationStatusLabel)
             }
+            }
         case .test:
             if model.canRunTest {
                 paragraph("Use Shift–Command–3 for the screen or Shift–Command–4 for a selection. Then check for a saved copy in your chosen folder and try pasting the image.")
@@ -222,8 +323,21 @@ struct ShotDropSetupView: View {
             default: break
             }
         }
-        if model.destinationIssue != nil, model.step != .welcome, let destination = model.destinationURL {
-            return "Can’t save to \(destination.path). Choose another folder or retry. The original screenshot will remain in its source folder if saving fails."
+        if let issue = model.destinationIssue, model.step != .welcome, let destination = model.destinationURL {
+            switch issue {
+            case .missing:
+                return "The selected save folder is missing: \(destination.path). Choose an existing folder at its current location."
+            case .changed:
+                return "The selected save folder moved or changed: \(destination.path). Choose its current location again so ShotDrop can check it."
+            case .denied:
+                return "ShotDrop cannot access the selected save folder: \(destination.path). Review Files and Folders access in System Settings, then retry, or choose another folder."
+            case .unsupported:
+                return "This save folder is not supported: \(destination.path). Choose a supported local folder; retrying this selection will not make it supported."
+            case .unsafe:
+                return "The screenshot source and save destination must be separate folders. Choose a different save folder that is not inside your screenshot folder and does not contain it."
+            case .unavailable:
+                return "The save folder could not be checked: \(destination.path). Make sure it is available, then retry, or choose another folder."
+            }
         }
         return nil
     }
@@ -310,6 +424,15 @@ struct ShotDropSetupView: View {
                         paragraph(result.reviewGuidance)
                         paragraph("Share this explanation with the developer through the channel where you received this build. Nothing is sent automatically. This build has no action that can approve this review or turn on saving.")
                             .foregroundStyle(.secondary)
+                    } else {
+                        paragraph(model.pausedSetupMessage)
+                        if let destination = model.destinationURL {
+                            path(destination, label: model.destinationStatusLabel)
+                        }
+                        Text("Next step").fontWeight(.semibold).accessibilityAddTraits(.isHeader)
+                        paragraph("Keep your selected folders and return after the remaining saving checks are resolved. Repeating Continue cannot approve these checks or enable saving.")
+                        paragraph("You can share this explanation with the developer through the channel where you received this build. Nothing is sent automatically.")
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .textSelection(.enabled)
@@ -320,7 +443,7 @@ struct ShotDropSetupView: View {
                 .accessibilityIdentifier("setup.details.back")
         }
         .padding(24)
-        .frame(width: 480, height: 440)
+        .frame(minWidth: 340, idealWidth: 440, maxWidth: 480, minHeight: 320, idealHeight: 400, maxHeight: 440)
         .accessibilityIdentifier("setup.details")
         .onAppear {
             keyboardFocus = .detailsHeading
@@ -334,8 +457,8 @@ struct ShotDropSetupView: View {
     }
 
     private func path(_ url: URL, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
+        VStack(alignment: .leading, spacing: 6) {
+            Label(label, systemImage: "folder")
                 .fontWeight(.medium)
                 .accessibilityHidden(true)
             Text(url.path)
@@ -346,6 +469,10 @@ struct ShotDropSetupView: View {
                 .accessibilityLabel(label)
                 .accessibilityValue(url.path)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
     }
 
     private var stepTransition: AnyTransition {
@@ -368,8 +495,9 @@ struct ShotDropSetupView: View {
         needsStepKeyboardFocus = false
         switch model.step {
         case .welcome, .test: keyboardFocus = .primary
-        case .destination: keyboardFocus = .destinationPicker
-        case .source: keyboardFocus = model.sourceURL == nil ? .sourcePicker : .sourceConfirmation
+        case .destination: keyboardFocus = model.proposesSupportedDefault ? .primary : .destinationPicker
+        case .source:
+            keyboardFocus = model.showsPausedSetup ? .primary : (model.sourceURL == nil ? .sourcePicker : .sourceConfirmation)
         }
     }
 
