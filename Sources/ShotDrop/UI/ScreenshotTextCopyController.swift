@@ -8,6 +8,14 @@ enum ScreenshotTextCopyState: Equatable, Sendable {
         self == .failed || self == .copyFailed || self == .writeFailed || self == .clipboardChanged || self == .cancelled
     }
 
+    static func actionTitle(for state: Self?) -> String {
+        state?.offersRetry == true ? "Try Copying Text Again" : "Copy Text"
+    }
+
+    static func accessibilityActionTitle(for state: Self?, filename: String) -> String {
+        "\(actionTitle(for: state)) from \(filename)"
+    }
+
     var message: String {
         switch self {
         case .recognizing: "Recognizing text…"

@@ -4,6 +4,22 @@ import XCTest
 
 @MainActor
 final class ScreenshotTextCopyTests: XCTestCase {
+    func testRetryMenuAndVoiceOverActionsUseTheSameIntentAndFullFilename() {
+        let filename = "Screenshot 日本語 with a long filename.png"
+        let retryStates: [ScreenshotTextCopyState] = [.failed, .copyFailed, .writeFailed, .clipboardChanged, .cancelled]
+        for state in retryStates {
+            XCTAssertEqual(ScreenshotTextCopyState.actionTitle(for: state), "Try Copying Text Again")
+            XCTAssertEqual(ScreenshotTextCopyState.accessibilityActionTitle(for: state, filename: filename),
+                           "Try Copying Text Again from \(filename)")
+        }
+        let otherStates: [ScreenshotTextCopyState?] = [nil, .recognizing, .copying, .copied, .noText, .unavailable, .multipleFrames, .tooLarge]
+        for state in otherStates {
+            XCTAssertEqual(ScreenshotTextCopyState.actionTitle(for: state), "Copy Text")
+            XCTAssertEqual(ScreenshotTextCopyState.accessibilityActionTitle(for: state, filename: filename),
+                           "Copy Text from \(filename)")
+        }
+    }
+
     func testOneAdmissionPublishesOnlyPlainUnicodeTextForInvokedRecord() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let record = try savedRecord(fixture)

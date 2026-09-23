@@ -240,7 +240,9 @@ struct RecentMenuPanel: View {
         .contextMenu { actionItems(row) }
         .accessibilityActions {
             if row.availability == .saved && !isRecognizingText && textCopyStates[row.id] != .unavailable {
-                Button("Copy Text from \(row.displayName)") { onAction(row.id, .copyText) }
+                Button(ScreenshotTextCopyState.accessibilityActionTitle(for: textCopyStates[row.id], filename: row.displayName)) {
+                    onAction(row.id, .copyText)
+                }
             }
             if textCopyStates[row.id] == .recognizing {
                 Button("Cancel Text Recognition for \(row.displayName)") { onAction(row.id, .cancelCopyText) }
@@ -257,9 +259,9 @@ struct RecentMenuPanel: View {
             .disabled(row.availability != .saved)
         Button("Copy File") { onAction(row.id, .copyFile) }
             .disabled(row.availability != .saved)
-        Button(textCopyStates[row.id]?.offersRetry == true ? "Try Copying Text Again" : "Copy Text") { onAction(row.id, .copyText) }
+        Button(ScreenshotTextCopyState.actionTitle(for: textCopyStates[row.id])) { onAction(row.id, .copyText) }
             .disabled(row.availability != .saved || isRecognizingText || textCopyStates[row.id] == .unavailable)
-            .accessibilityLabel("Copy Text from \(row.displayName)")
+            .accessibilityLabel(ScreenshotTextCopyState.accessibilityActionTitle(for: textCopyStates[row.id], filename: row.displayName))
             .help(isRecognizingText ? "One text recognition is already running. Try again when it finishes."
                   : "Recognize text on this Mac from this saved screenshot. The image stays on this Mac. Check the text after pasting; complex layouts may need correction.")
         if textCopyStates[row.id] == .recognizing {
