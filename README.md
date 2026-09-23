@@ -4,8 +4,9 @@ Every screenshot is instantly copied AND saved exactly where you want it.
 
 ShotDrop is a Swift 6 menu bar app for macOS 14 and later. The current M0
 scaffold provides the app shell, settings skeleton, launch-at-login control,
-and hosted unit tests. Screenshot detection, automatic copying, file moving,
-history, and floating previews are not implemented yet. See
+and hosted unit tests. A filesystem-first screenshot detection service is implemented
+and tested with synthetic images, but is not yet activated by the app. Automatic
+copying, file moving, history, and floating previews are not implemented yet. See
 [the roadmap](docs/ROADMAP.md) for remaining work.
 
 ## Development
