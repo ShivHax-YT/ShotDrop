@@ -14,7 +14,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
         var request = fixture.request(template: "{app}-{date}-{time}")
         request.organizeByDate = true
         request.expectedIdentity = try LocalScreenshotFileSystem().identity(at: fixture.source)
-        let result = try await ScreenshotOrganizer().organize(request)
+        let result = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(request)
         XCTAssertEqual(result.destinationURL.path, fixture.destination.path + "/2026/09/Notes-2026-09-22-12-00-00.png")
         XCTAssertFalse(result.sourceWasRemoved)
         XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.data)
@@ -29,7 +29,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
         for name in ["capture.png", "capture (2).png", "capture (3).png"] {
             try Data(name.utf8).write(to: fixture.destination.appendingPathComponent(name))
         }
-        let result = try await ScreenshotOrganizer().organize(fixture.request())
+        let result = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(fixture.request())
         XCTAssertEqual(result.destinationURL.lastPathComponent, "capture (4).png")
         for name in ["capture.png", "capture (2).png", "capture (3).png"] {
             XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent(name)), Data(name.utf8))
@@ -45,7 +45,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
             try Data(name.utf8).write(to: fixture.destination.appendingPathComponent(name))
         }
         do {
-            _ = try await ScreenshotOrganizer(collisionLimit: 2).organize(fixture.request())
+            _ = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool), collisionLimit: 2).organize(fixture.request())
             XCTFail("Expected collision exhaustion")
         } catch let failure as ScreenshotCopyFailure {
             XCTAssertEqual(failure.code, .collision)
@@ -59,10 +59,10 @@ final class ScreenshotOrganizerTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         do {
-            _ = try await ScreenshotOrganizer().organize(fixture.request(template: "{unknown}"))
+            _ = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(fixture.request(template: "{unknown}"))
             XCTFail("Expected template failure")
         } catch is ScreenshotNamingError {}
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        XCTAssertEqual(try visibleEntries(in: fixture.destination), [])
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
     }
 
@@ -71,14 +71,13 @@ final class ScreenshotOrganizerTests: XCTestCase {
         defer { fixture.cleanUp() }
         let receipt = OSAllocatedUnfairLock<(token: UUID?, stageInode: UInt64?)>(initialState: (nil, nil))
         let destination = fixture.destination
-        let result = try await ScreenshotOrganizer().organize(fixture.request()) { token in
-            let names = try FileManager.default.contentsOfDirectory(atPath: destination.path)
-            XCTAssertEqual(names.count, 1)
-            XCTAssertTrue(names.allSatisfy { $0.hasPrefix(".shotdrop-staging-") })
-            let directory = destination.appendingPathComponent(try XCTUnwrap(names.first))
-            let stages = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            XCTAssertEqual(stages.count, 1)
-            let stage = try XCTUnwrap(stages.first)
+        let poolRoot = fixture.poolRoot
+        let result = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(fixture.request()) { token in
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+            let stages = try FileManager.default.contentsOfDirectory(at: poolRoot, includingPropertiesForKeys: [.fileSizeKey])
+                .filter { $0.pathExtension == "stage" }
+            XCTAssertEqual(stages.count, 2)
+            let stage = try XCTUnwrap(stages.first { ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 })
             let attributes = try FileManager.default.attributesOfItem(atPath: stage.path)
             let inode = try XCTUnwrap(attributes[.systemFileNumber] as? NSNumber).uint64Value
             receipt.withLock { $0 = (token, inode) }
@@ -94,7 +93,7 @@ final class ScreenshotOrganizerTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         do {
-            _ = try await ScreenshotOrganizer().organize(fixture.request()) { _ in
+            _ = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(fixture.request()) { _ in
                 throw CancellationError()
             }
             XCTFail("Cancellation must propagate")
@@ -103,37 +102,43 @@ final class ScreenshotOrganizerTests: XCTestCase {
         XCTAssertEqual(try visibleEntries(in: fixture.destination), [])
     }
 
-    func testAlreadyCancelledOperationDoesNotCreateDestination() async throws {
+    func testAlreadyCancelledOperationDoesNotWriteDestination() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         let request = fixture.request()
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            return try await ScreenshotOrganizer().organize(request)
+            return try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(request)
         }
         do {
             _ = try await task.value
             XCTFail("Expected cancellation")
         } catch is CancellationError {}
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        XCTAssertEqual(try visibleEntries(in: fixture.destination), [])
         XCTAssertEqual(try Data(contentsOf: fixture.source), fixture.data)
     }
 
     func testSourceFolderDestinationDoesNotFeedOwnCopyBackIntoDetector() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
+        // This low-level feedback regression deliberately publishes beside its input;
+        // explicitly review that selected directory instead of reusing another review.
+        try fixture.pool.updateDestinationReview(
+            at: fixture.sourceDirectory, forRoot: fixture.poolRoot,
+            sourceDirectory: fixture.sourceDirectory, ordinaryLocalDestinationReviewed: true
+        )
         try markScreenshot(fixture.source)
         let unexpected = expectation(description: "Own organized output is never recaptured")
         unexpected.isInverted = true
         let detector = ScreenshotDetector(useSpotlight: false) { _ in unexpected.fulfill() }
-        try await detector.start(in: fixture.root)
+        try await detector.start(in: fixture.sourceDirectory)
         let base = fixture.request()
         let request = ScreenshotOrganizationRequest(
-            sourceURL: base.sourceURL, destinationRoot: fixture.root, template: base.template,
+            sourceURL: base.sourceURL, destinationRoot: fixture.sourceDirectory, template: base.template,
             namingContext: base.namingContext
         )
         do {
-            let result = try await ScreenshotOrganizer().organize(request) { token in
+            let result = try await ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool)).organize(request) { token in
                 await detector.ignoreOutput(token: token)
             }
             let snapshot = try XCTUnwrap(LocalScreenshotFileSystem().snapshot(at: result.destinationURL))
@@ -159,22 +164,32 @@ final class ScreenshotOrganizerTests: XCTestCase {
 
     private func visibleEntries(in directory: URL) throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: directory.path)
-            .filter { !$0.hasPrefix(".shotdrop-staging-") }
     }
 }
 
 private struct Fixture {
     let root: URL
+    let sourceDirectory: URL
+    let poolRoot: URL
+    let pool: ScreenshotStagingPool
     let source: URL
     let destination: URL
     let data: Data
 
     init() throws {
-        root = FileManager.default.temporaryDirectory
+        root = try resolvedStagingTemporaryDirectory()
             .appendingPathComponent("ShotDropOrganizer-\(UUID().uuidString)", isDirectory: true)
-        source = root.appendingPathComponent("source.png")
+        sourceDirectory = root.appendingPathComponent("source", isDirectory: true)
+        source = sourceDirectory.appendingPathComponent("source.png")
         destination = root.appendingPathComponent("destination", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        poolRoot = root.appendingPathComponent("pool", isDirectory: true)
+        pool = ScreenshotStagingPool(registryDirectory: root.appendingPathComponent("registry", isDirectory: true))
+        try pool.initialize(legacyArtifactsAccountedFor: true)
+        try pool.registerRoot(at: poolRoot, sourceDirectory: sourceDirectory, destinationDirectory: destination,
+                              ordinaryLocalDestinationReviewed: true)
         let context = try XCTUnwrap(CGContext(
             data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue

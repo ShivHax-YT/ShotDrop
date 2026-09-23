@@ -15,6 +15,7 @@ struct ScreenshotOrganizationResult: Sendable {
     let destinationURL: URL
     let destinationIdentity: ScreenshotFileIdentity
     let outputToken: UUID
+    var housekeeping: ScreenshotStageHousekeeping = .clean
     /// Cleanup of originals is a separate, future opt-in feature.
     let sourceWasRemoved = false
 }
@@ -23,6 +24,7 @@ struct ScreenshotOrganizationResult: Sendable {
 actor ScreenshotOrganizer {
     private let fileSystem: any ScreenshotOrganizationFileSystem
     private let collisionLimit: Int
+    private var transactionActive = false
     private let logger = Logger(subsystem: "com.macfleet.shotdrop", category: "Organization")
 
     init(
@@ -38,6 +40,11 @@ actor ScreenshotOrganizer {
         beforePublishing: @Sendable (UUID) async throws -> Void = { _ in }
     ) async throws -> ScreenshotOrganizationResult {
         try Task.checkCancellation()
+        guard !transactionActive else {
+            throw ScreenshotCopyFailure(code: .stagingPaused, detail: "Another screenshot save is still using the staging pool. Retry when it finishes.")
+        }
+        transactionActive = true
+        defer { transactionActive = false }
         let plan = try ScreenshotNaming.plan(
             template: request.template,
             sourceExtension: request.sourceURL.pathExtension,
@@ -66,7 +73,8 @@ actor ScreenshotOrganizer {
                     sourceURL: request.sourceURL,
                     destinationURL: copy.destinationURL,
                     destinationIdentity: copy.identity,
-                    outputToken: copy.outputToken
+                    outputToken: copy.outputToken,
+                    housekeeping: copy.housekeeping
                 )
             } catch let error as ScreenshotCopyFailure where error.code == .collision {
                 continue

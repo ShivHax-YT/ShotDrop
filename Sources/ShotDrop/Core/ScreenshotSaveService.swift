@@ -31,7 +31,7 @@ enum ScreenshotSaveRecoveryAction: String, Identifiable, Sendable {
 
 struct ScreenshotSaveFailure: Sendable {
     enum Reason: Sendable {
-        case accessRequired, destinationOverlap, invalidDestination
+        case accessRequired, destinationOverlap, invalidDestination, stagingPaused
         case unsupportedFilesystem, crossDeviceClone, noSpace, permissionDenied
         case verificationFailed, collision, invalidName, sourceUnavailable, sourceChanged, sourceOutsideFolder, ioFailure
     }
@@ -54,6 +54,8 @@ struct ScreenshotSaveFailure: Sendable {
             explanation = "Choose a destination separate from the screenshot source folder. Neither folder can contain the other."
         case .invalidDestination:
             explanation = "The destination folder is unavailable or invalid. Choose an accessible folder and retry."
+        case .stagingPaused:
+            explanation = "Saving is paused because its private staging storage is busy or needs attention. Retry after the current save finishes or staging storage has been checked."
         case .unsupportedFilesystem:
             explanation = "This destination doesn’t support the safe copy operation. Choose another destination."
         case .crossDeviceClone:
@@ -207,6 +209,7 @@ actor ScreenshotSaveService {
 
     private static func reason(for error: Error) -> ScreenshotSaveFailure.Reason {
         if error is SourceLocationFailure { return .sourceOutsideFolder }
+        if (error as? ScreenshotCopyFailure)?.code == .stagingPaused { return .stagingPaused }
         let code = (error as? ScreenshotCopyFailure)?.posixCode
             ?? (error as? ScreenshotDestinationValidationFailure)?.posixCode
         if let code {
@@ -228,6 +231,7 @@ actor ScreenshotSaveService {
             case .collision: return .collision
             case .invalidName: return .invalidName
             case .ioFailure: return .ioFailure
+            case .stagingPaused: return .stagingPaused
             }
         }
         if let failure = error as? ScreenshotDestinationValidationFailure {

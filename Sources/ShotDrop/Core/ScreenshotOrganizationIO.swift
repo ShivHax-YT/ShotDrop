@@ -1,9 +1,16 @@
 import Foundation
 
+/// Publication can succeed even when a private slot must remain charged and retired.
+enum ScreenshotStageHousekeeping: Sendable, Equatable {
+    case clean
+    case retired(String)
+}
+
 struct VerifiedScreenshotCopy: Sendable {
     let destinationURL: URL
     let identity: ScreenshotFileIdentity
     let outputToken: UUID
+    var housekeeping: ScreenshotStageHousekeeping = .clean
 }
 
 /// Copied with the staged file so output suppression survives cloning to a new inode.
@@ -14,7 +21,7 @@ enum ScreenshotOutputMarker {
 struct ScreenshotCopyFailure: Error, LocalizedError, Sendable {
     enum Code: String, Sendable {
         case collision, sourceUnavailable, sourceChanged, destinationUnavailable
-        case permissionDenied, verificationFailed, invalidName, ioFailure
+        case permissionDenied, verificationFailed, invalidName, ioFailure, stagingPaused
     }
     let code: Code
     let detail: String

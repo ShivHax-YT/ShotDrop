@@ -18,7 +18,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             let fixture = try SaveFixture()
             defer { fixture.cleanUp() }
             let calls = OSAllocatedUnfairLock(initialState: 0)
-            let fileSystem = LocalScreenshotOrganizationFileSystem(clone: { _, _, _ in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, clone: { _, _, _ in
                 calls.withLock { $0 += 1 }
                 errno = code.rawValue
                 return -1
@@ -41,13 +41,13 @@ final class ScreenshotSaveServiceTests: XCTestCase {
     func testVerificationFailureCannotBecomeSavedSuccess() async throws {
         let fixture = try SaveFixture()
         defer { fixture.cleanUp() }
-        let destination = fixture.destination
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
+        let poolRoot = fixture.poolRoot
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { phase in
             guard phase == .beforeVerification else { return }
-            let directory = try XCTUnwrap(FileManager.default.contentsOfDirectory(
-                at: destination, includingPropertiesForKeys: nil
-            ).first { $0.lastPathComponent.hasPrefix(".shotdrop-staging-") })
-            try Data("corrupted stage".utf8).write(to: directory.appendingPathComponent("screenshot.stage"))
+            let slots = try FileManager.default.contentsOfDirectory(at: poolRoot, includingPropertiesForKeys: [.fileSizeKey])
+                .filter { $0.pathExtension == "stage" }
+            let stage = try XCTUnwrap(slots.first { ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 })
+            try Data("corrupted stage".utf8).write(to: stage)
         })
         let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: fileSystem))
         let failure = try failed(await service.save(try fixture.request()))
@@ -62,7 +62,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
     func testPostPublicationFailureRemainsFailedAndReportsSurvivingCopy() async throws {
         let fixture = try SaveFixture()
         defer { fixture.cleanUp() }
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { phase in
             if phase == .afterPublish {
                 throw ScreenshotCopyFailure(code: .verificationFailed, detail: "Injected final verification failure")
             }
@@ -86,7 +86,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         for name in occupied {
             try Data(name.utf8).write(to: fixture.destination.appendingPathComponent(name))
         }
-        let result = try saved(await ScreenshotSaveService().save(try fixture.request()))
+        let result = try saved(await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(try fixture.request()))
         XCTAssertEqual(result.destinationURL.lastPathComponent, "capture (3).png")
         XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
         XCTAssertFalse(result.sourceWasRemoved)
@@ -102,7 +102,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         let destination = fixture.destination
         let competing = Data("another writer won the destination name".utf8)
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(clone: { sourceFD, directoryFD, name in
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, clone: { sourceFD, directoryFD, name in
             let count = calls.withLock { $0 += 1; return $0 }
             if count == 1 {
                 do { try competing.write(to: destination.appendingPathComponent(name)) }
@@ -113,11 +113,29 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             return fclonefileat(sourceFD, directoryFD, name, UInt32(CLONE_ACL))
         })
         let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: fileSystem))
-        let result = try saved(await service.save(try fixture.request()))
+        let outcome = await service.save(try fixture.request())
+        // Assert preservation even in the deliberately broken transition baseline.
+        XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent("capture.png")), competing)
+        try fixture.assertPreserved()
+        guard case .saved(let result) = outcome else {
+            XCTFail("Clone EEXIST retry must produce a saved receipt; got \(outcome)")
+            throw UnexpectedOutcome()
+        }
         XCTAssertEqual(calls.withLock { $0 }, 2)
         XCTAssertEqual(result.destinationURL.lastPathComponent, "capture (2).png")
         XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
         XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent("capture.png")), competing)
+        XCTAssertEqual(result.housekeeping, .clean)
+        let next = try saved(await service.save(try fixture.request()))
+        XCTAssertEqual(calls.withLock { $0 }, 3)
+        XCTAssertEqual(next.destinationURL.lastPathComponent, "capture (3).png")
+        XCTAssertEqual(next.housekeeping, .clean, "The successful collision retry must leave a reusable slot")
+        XCTAssertEqual(try Data(contentsOf: next.destinationURL), fixture.bytes)
+        XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
+        XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent("capture.png")), competing)
+        for name in ["slot-0.stage", "slot-1.stage"] {
+            XCTAssertEqual(try Data(contentsOf: fixture.poolRoot.appendingPathComponent(name)), Data())
+        }
         try fixture.assertPreserved()
     }
 
@@ -128,7 +146,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         for name in occupied {
             try Data(name.utf8).write(to: fixture.destination.appendingPathComponent(name))
         }
-        let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(collisionLimit: occupied.count))
+        let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool), collisionLimit: occupied.count))
         let failure = try failed(await service.save(try fixture.request()))
         XCTAssertEqual(failure.reason, .collision)
         XCTAssertEqual(failure.originalStatus, .available)
@@ -145,7 +163,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         let fixture = try SaveFixture()
         defer { fixture.cleanUp() }
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(clone: { sourceFD, directoryFD, name in
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, clone: { sourceFD, directoryFD, name in
             let count = calls.withLock { $0 += 1; return $0 }
             if count == 1 {
                 errno = ENOSPC
@@ -182,7 +200,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             expectedIdentity: organization.expectedIdentity
         )
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { _ in calls.withLock { $0 += 1 } })
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { _ in calls.withLock { $0 += 1 } })
         let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: fileSystem))
         let request = ScreenshotSaveRequest(organization: organization, sourceDirectoryURL: fixture.sourceDirectory)
         let failure = try failed(await service.save(request))
@@ -208,7 +226,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             ), sourceDirectoryURL: fixture.sourceDirectory, destinationAccess: .userApproved
         )
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { _ in calls.withLock { $0 += 1 } })
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { _ in calls.withLock { $0 += 1 } })
         let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: fileSystem))
         let failure = try failed(await service.save(request))
         XCTAssertEqual(failure.reason, .destinationOverlap)
@@ -234,7 +252,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         )
         let sourceEntries = try FileManager.default.contentsOfDirectory(atPath: fixture.sourceDirectory.path).sorted()
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { _ in calls.withLock { $0 += 1 } })
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { _ in calls.withLock { $0 += 1 } })
         let service = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: fileSystem))
         let failure = try failed(await service.save(request))
         XCTAssertEqual(failure.reason, .sourceOutsideFolder)
@@ -257,7 +275,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             organization: try fixture.request().organization,
             sourceDirectoryURL: alias, destinationAccess: .userApproved
         )
-        let result = try saved(await ScreenshotSaveService().save(request))
+        let result = try saved(await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(request))
         XCTAssertEqual(result.destinationURL, fixture.destination.appendingPathComponent("capture.png"))
         XCTAssertEqual(try Data(contentsOf: result.destinationURL), fixture.bytes)
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: alias.path), fixture.sourceDirectory.path)
@@ -276,7 +294,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             organization: try fixture.request().organization,
             sourceDirectoryURL: alias, destinationAccess: .userApproved
         )
-        let outcome = await ScreenshotSaveService().save(request) { _ in
+        let outcome = await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(request) { _ in
             try FileManager.default.moveItem(at: alias, to: parkedAlias)
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: differentDirectory)
         }
@@ -298,7 +316,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         let request = try fixture.request()
         let parked = fixture.root.appendingPathComponent("parked-original.png")
         try FileManager.default.moveItem(at: fixture.source, to: parked)
-        let failure = try failed(await ScreenshotSaveService().save(request))
+        let failure = try failed(await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(request))
         XCTAssertEqual(failure.reason, .sourceUnavailable)
         XCTAssertEqual(failure.originalStatus, .unavailable)
         XCTAssertFalse(failure.actions.contains(.revealOriginal))
@@ -313,7 +331,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         defer { fixture.cleanUp() }
         let source = fixture.source
         let parked = fixture.root.appendingPathComponent("parked-original.png")
-        let fileSystem = LocalScreenshotOrganizationFileSystem(clone: { _, _, _ in
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, clone: { _, _, _ in
             do { try FileManager.default.moveItem(at: source, to: parked) }
             catch { XCTFail("Could not move fixture source: \(error)") }
             errno = ENOSPC
@@ -338,7 +356,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         try FileManager.default.moveItem(at: fixture.source, to: parked)
         let replacement = Data("a different file now owns the original path".utf8)
         try replacement.write(to: fixture.source)
-        let failure = try failed(await ScreenshotSaveService().save(request))
+        let failure = try failed(await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(request))
         XCTAssertEqual(failure.reason, .sourceChanged)
         XCTAssertEqual(failure.originalStatus, .changed)
         XCTAssertFalse(failure.actions.contains(.revealOriginal))
@@ -354,7 +372,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
         defer { fixture.cleanUp() }
         let source = fixture.source
         let changed = Data("same inode now contains changed screenshot bytes".utf8)
-        let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
+        let fileSystem = LocalScreenshotOrganizationFileSystem(pool: fixture.pool, fault: { phase in
             guard phase == .afterCopy else { return }
             let handle = try FileHandle(forWritingTo: source)
             defer { try? handle.close() }
@@ -377,7 +395,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
     func testCancellationDuringPublicationIsSeparateFromSaveFailure() async throws {
         let fixture = try SaveFixture()
         defer { fixture.cleanUp() }
-        let outcome = await ScreenshotSaveService().save(try fixture.request()) { _ in
+        let outcome = await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(try fixture.request()) { _ in
             throw CancellationError()
         }
         guard case .cancelled(let originalURL) = outcome else {
@@ -401,7 +419,7 @@ final class ScreenshotSaveServiceTests: XCTestCase {
             ), sourceDirectoryURL: fixture.sourceDirectory, destinationAccess: .userApproved
         )
         XCTAssertNil(request.organization.expectedIdentity)
-        let outcome = await ScreenshotSaveService().save(request) { _ in
+        let outcome = await ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: LocalScreenshotOrganizationFileSystem(pool: fixture.pool))).save(request) { _ in
             let handle = try FileHandle(forWritingTo: source)
             defer { try? handle.close() }
             try handle.truncate(atOffset: 0)
@@ -442,6 +460,8 @@ final class ScreenshotSaveServiceTests: XCTestCase {
 private struct SaveFixture {
     let root: URL
     let sourceDirectory: URL
+    let poolRoot: URL
+    let pool: ScreenshotStagingPool
     let source: URL
     let destination: URL
     let bytes: Data
@@ -449,7 +469,7 @@ private struct SaveFixture {
     private let sentinelBytes = Data("unrelated user file must survive every save operation".utf8)
 
     init() throws {
-        root = FileManager.default.temporaryDirectory
+        root = try resolvedStagingTemporaryDirectory()
             .appendingPathComponent("ShotDropSaveService-\(UUID().uuidString)", isDirectory: true)
         sourceDirectory = root.appendingPathComponent("screenshots", isDirectory: true)
         source = sourceDirectory.appendingPathComponent("original.png")
@@ -458,6 +478,11 @@ private struct SaveFixture {
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        poolRoot = root.appendingPathComponent("pool", isDirectory: true)
+        pool = ScreenshotStagingPool(registryDirectory: root.appendingPathComponent("registry", isDirectory: true))
+        try pool.initialize(legacyArtifactsAccountedFor: true)
+        try pool.registerRoot(at: poolRoot, sourceDirectory: sourceDirectory, destinationDirectory: destination,
+                              ordinaryLocalDestinationReviewed: true)
         let context = try XCTUnwrap(CGContext(
             data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
@@ -505,7 +530,7 @@ private struct SaveFixture {
 
     func visibleDestinationEntries() throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: destination.path)
-            .filter { !$0.hasPrefix(".shotdrop-staging-") }.sorted()
+            .sorted()
     }
 
     func cleanUp() { try? FileManager.default.removeItem(at: root) }

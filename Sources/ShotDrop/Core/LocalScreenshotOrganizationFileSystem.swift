@@ -4,17 +4,20 @@ import Foundation
 
 /// Descriptor-bound, source-preserving publication. Transactions are actor confined.
 struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
+    private let pool: ScreenshotStagingPool
     private let fault: @Sendable (ScreenshotCopyPhase) throws -> Void
     private let race: @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void
     private let clone: @Sendable (Int32, Int32, String) -> Int32
 
     init(
+        pool: ScreenshotStagingPool = .applicationDefault,
         fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void = { _ in },
         race: @escaping @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void = { _, _ in },
         clone: @escaping @Sendable (Int32, Int32, String) -> Int32 = { sourceFD, directoryFD, name in
             fclonefileat(sourceFD, directoryFD, name, UInt32(CLONE_ACL))
         }
     ) {
+        self.pool = pool
         self.fault = fault
         self.race = race
         self.clone = clone
@@ -40,6 +43,11 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
         if let expectedIdentity, expectedIdentity != initial.identity {
             throw copyFailure(.sourceChanged, "Screenshot identity changed before copying.")
         }
+        // Admission precedes any destination mutation. The cooperative global lock
+        // remains owned by this lease through publication, actor awaits and reset.
+        let lease = try pool.lease(sourceDirectory: source.deletingLastPathComponent(), destinationDirectory: destinationRoot)
+        var transferredLease = false
+        defer { if !transferredLease { lease.retire("Staging construction did not complete.") } }
         do {
             try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
         } catch {
@@ -63,23 +71,12 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
             directoryURL.appendPathComponent(component, isDirectory: true)
             directories.append((directoryURL, try CopyFileState.read(directoryFD).identity))
         }
-        let privateName = ".shotdrop-staging-\(UUID().uuidString)"
-        guard mkdirat(directoryFD, privateName, 0o700) == 0 else {
-            throw posixCopyFailure(.destinationUnavailable, "Create private screenshot staging directory")
-        }
-        let privateFD = openat(directoryFD, privateName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard privateFD >= 0 else { throw posixCopyFailure(.destinationUnavailable, "Open private screenshot staging directory") }
-        defer { close(privateFD) }
-        let stageName = "screenshot.stage"
-        let stageFD = openat(privateFD, stageName, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard stageFD >= 0 else { throw posixCopyFailure(.destinationUnavailable, "Create screenshot stage") }
-        // Never remove an entry by pathname, even on construction failure.
         let staged = LocalStagedScreenshotCopy(
             source: source, sourceFD: sourceFD, initial: initial,
             directory: directoryURL, directoryFD: directoryFD, directories: directories,
-            stageURL: directoryURL.appendingPathComponent(privateName).appendingPathComponent(stageName),
-            stageFD: stageFD, fault: fault, race: race, clone: clone
+            lease: lease, fault: fault, race: race, clone: clone
         )
+        transferredLease = true
         ownsSource = false
         ownsDirectory = false
         try staged.prepare()
@@ -128,6 +125,7 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     private let directory: URL
     private let directoryFD: Int32
     private let directories: [(URL, ScreenshotFileIdentity)]
+    private let lease: ScreenshotStagingLease
     private let stageURL: URL
     private let stageFD: Int32
     private let fault: @Sendable (ScreenshotCopyPhase) throws -> Void
@@ -144,7 +142,7 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
 
     init(source: URL, sourceFD: Int32, initial: CopyFileState,
          directory: URL, directoryFD: Int32, directories: [(URL, ScreenshotFileIdentity)],
-         stageURL: URL, stageFD: Int32,
+         lease: ScreenshotStagingLease,
          fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void,
          race: @escaping @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void,
          clone: @escaping @Sendable (Int32, Int32, String) -> Int32) {
@@ -154,20 +152,20 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         self.directory = directory
         self.directoryFD = directoryFD
         self.directories = directories
-        self.stageURL = stageURL
-        self.stageFD = stageFD
+        self.lease = lease
+        self.stageURL = lease.url
+        self.stageFD = lease.descriptor
         self.fault = fault
         self.race = race
         self.clone = clone
         var info = stat()
-        _ = fstat(stageFD, &info)
+        _ = fstat(lease.descriptor, &info)
         identity = CopyFileState(info).identity
     }
 
     deinit {
         discard()
         if outputFD >= 0 { close(outputFD) }
-        close(stageFD)
         close(directoryFD)
         close(sourceFD)
     }
@@ -176,17 +174,11 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         try fault(.beforeCopy)
         try verifySource()
         try verifyDirectories()
-        let sourceAttributes = try copyAttributes(sourceFD)
-        guard fcopyfile(sourceFD, stageFD, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 else {
-            throw posixCopyFailure(.ioFailure, "Copy screenshot data and metadata")
-        }
-        let marker = Data(outputToken.uuidString.utf8)
-        let markerResult = marker.withUnsafeBytes {
-            fsetxattr(stageFD, ScreenshotOutputMarker.attributeName, $0.baseAddress, $0.count, 0, 0)
-        }
-        guard markerResult == 0 else { throw posixCopyFailure(.ioFailure, "Mark screenshot output") }
-        attributes = sourceAttributes
-        attributes[ScreenshotOutputMarker.attributeName] = Data(SHA256.hash(data: marker))
+        let sourceAttributes = try BoundedScreenshotCopy.attributes(sourceFD)
+        try lease.transition(.writing)
+        try BoundedScreenshotCopy().copy(sourceFD: sourceFD, stageFD: stageFD, outputToken: outputToken,
+                                         baseline: lease.baseline)
+        attributes = lease.baseline.expectedStageAttributes(sourceAttributes: sourceAttributes, outputToken: outputToken)
         identity = try CopyFileState.read(stageFD).identity
         try fault(.afterCopy)
         try fault(.beforeVerification)
@@ -194,12 +186,13 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         digest = try copyDigest(sourceFD)
         try verifyContents(stageFD)
         try verifySource()
-        guard sourceAttributes == (try copyAttributes(sourceFD)) else {
+        guard sourceAttributes == (try BoundedScreenshotCopy.attributes(sourceFD)) else {
             throw copyFailure(.sourceChanged, "Screenshot metadata changed while copying.")
         }
         try verifyStagePath()
         try verifyDirectories()
         guard fsync(stageFD) == 0 else { throw posixCopyFailure(.ioFailure, "Flush screenshot stage") }
+        try lease.transition(.prepared)
     }
 
     func publish(named filename: String) throws -> VerifiedScreenshotCopy {
@@ -219,6 +212,7 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
             try verifyDirectories()
             try verifyStagePath()
             try verifyContents(stageFD)
+            try lease.transition(.publishing)
             try race(.afterStageVerificationBeforePublish, stageURL)
             // Reads the pinned stage inode, never its mutable pathname. Atomic and exclusive.
             // Unsupported filesystems fail safely; a pathname-rename fallback is not safe.
@@ -246,7 +240,19 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
                 throw copyFailure(.verificationFailed, "Published screenshot path changed during verification.")
             }
             guard fsync(directoryFD) == 0 else { throw posixCopyFailure(.ioFailure, "Flush destination directory") }
-            return VerifiedScreenshotCopy(destinationURL: output, identity: outputState.identity, outputToken: outputToken)
+            // Output verification is complete. Housekeeping cannot revoke this receipt.
+            let housekeeping: ScreenshotStageHousekeeping
+            do {
+                try race(.afterStageIdentityCheckBeforeCleanup, stageURL)
+                housekeeping = lease.reset(knownOutputFD: outputFD)
+            } catch {
+                let reason = "Private staging cleanup was interrupted: \(error.localizedDescription)"
+                lease.retire(reason)
+                housekeeping = .retired(reason)
+            }
+            stageOwned = false
+            return VerifiedScreenshotCopy(destinationURL: output, identity: outputState.identity,
+                                          outputToken: outputToken, housekeeping: housekeeping)
         } catch {
             if let publishedURL {
                 var failure = (error as? ScreenshotCopyFailure)
@@ -261,24 +267,9 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     func discard() {
         guard stageOwned else { return }
         stageOwned = false
-        // This check is diagnostic only. No following operation resolves the pathname.
-        if (try? verifyStagePath()) != nil {
-            try? race(.afterStageIdentityCheckBeforeCleanup, stageURL)
-        }
-        // Reclaim only the inode pinned by our descriptor. Keep empty private artifacts:
-        // Darwin offers no inode-conditional unlink, and another same-user process can
-        // replace even an entry in a 0700 directory. Never risk deleting that replacement.
-        // A substituted output can alias the stage inode. Preserve it even when publication
-        // failed verification, rather than emptying an externally visible hard link.
-        if let outputIdentity,
-           outputIdentity.device == identity.device, outputIdentity.inode == identity.inode { return }
-        if outputFD >= 0 {
-            guard let outputState = try? CopyFileState.read(outputFD),
-                  let stageState = try? CopyFileState.read(stageFD),
-                  outputState.identity.device != stageState.identity.device
-                    || outputState.identity.inode != stageState.identity.inode else { return }
-        }
-        _ = ftruncate(stageFD, 0)
+        // Uncertain or unpublished transactions are never reset. Their fixed slot
+        // remains charged at its full allowance until a reviewed recovery action.
+        lease.retire("Screenshot transaction ended without verified publication.")
     }
 
     private func recoveryURL(preferred: URL) -> URL? {
@@ -292,7 +283,8 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         let result = buffer.withUnsafeMutableBytes { fcntl(outputFD, F_GETPATH, $0.baseAddress!) }
         guard result == 0 else { return nil }
-        let current = URL(fileURLWithPath: String(cString: buffer))
+        let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        let current = URL(fileURLWithPath: path)
         return stillIdentifiesOutput(current) ? current : nil
     }
 
@@ -325,7 +317,7 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     }
 
     private func verifyContents(_ descriptor: Int32) throws {
-        guard try copyDigest(descriptor) == digest, try copyAttributes(descriptor) == attributes else {
+        guard try copyDigest(descriptor) == digest, try BoundedScreenshotCopy.attributes(descriptor) == attributes else {
             throw copyFailure(.verificationFailed, "Screenshot bytes or metadata did not match the source.")
         }
     }
@@ -366,6 +358,9 @@ private func copyDigest(_ descriptor: Int32) throws -> Data {
     var buffer = [UInt8](repeating: 0, count: 256 * 1024)
     var offset: off_t = 0
     let expectedSize = try CopyFileState.read(descriptor).size
+    guard expectedSize >= 0, expectedSize <= Int64(ScreenshotStagingLimits.maximumPayloadBytes) else {
+        throw copyFailure(.verificationFailed, "Screenshot exceeds the bounded verification size.")
+    }
     while offset < expectedSize {
         try Task.checkCancellation()
         let requested = Int(min(Int64(buffer.count), expectedSize - offset))
@@ -382,30 +377,6 @@ private func copyDigest(_ descriptor: Int32) throws -> Data {
         throw copyFailure(.verificationFailed, "Screenshot size changed during verification.")
     }
     return Data(hasher.finalize())
-}
-
-/// Bound metadata allocation independently of image size. Oversized metadata fails safely.
-private func copyAttributes(_ descriptor: Int32) throws -> [String: Data] {
-    let listSize = flistxattr(descriptor, nil, 0, 0)
-    guard listSize >= 0 else { throw posixCopyFailure(.verificationFailed, "Read screenshot metadata names") }
-    guard listSize <= 1024 * 1024 else { throw copyFailure(.verificationFailed, "Screenshot metadata list is too large.") }
-    if listSize == 0 { return [:] }
-    var names = [CChar](repeating: 0, count: listSize)
-    let readSize = flistxattr(descriptor, &names, names.count, 0)
-    guard readSize == listSize else { throw copyFailure(.verificationFailed, "Screenshot metadata changed during verification.") }
-    let decoded = names.split(separator: 0).map { String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) }
-    var result: [String: Data] = [:]
-    for name in decoded {
-        try Task.checkCancellation()
-        let size = fgetxattr(descriptor, name, nil, 0, 0, 0)
-        guard size >= 0 else { throw posixCopyFailure(.verificationFailed, "Read screenshot metadata size") }
-        guard size <= 16 * 1024 * 1024 else { throw copyFailure(.verificationFailed, "Screenshot metadata value is too large to verify safely.") }
-        var value = Data(count: size)
-        let actual = value.withUnsafeMutableBytes { fgetxattr(descriptor, name, $0.baseAddress, size, 0, 0) }
-        guard actual == size else { throw copyFailure(.verificationFailed, "Screenshot metadata changed during verification.") }
-        result[name] = Data(SHA256.hash(data: value))
-    }
-    return result
 }
 
 private func validateCopyComponent(_ name: String) throws {
