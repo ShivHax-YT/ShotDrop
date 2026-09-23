@@ -49,6 +49,7 @@ final class ShotDropSetupModel {
     private(set) var requiresSourceSelection = false
     private(set) var isSourceLocationUnknown = false
     private(set) var defaultPreparationResult: DefaultDestinationPreparationResult?
+    private(set) var isShowingSetupDetails = false
 
     @ObservationIgnored private let service: any ShotDropSetupAccessServing
     @ObservationIgnored private let gate: any ShotDropSetupReadinessGating
@@ -79,8 +80,17 @@ final class ShotDropSetupModel {
     var destinationStatusLabel: String {
         if canRunTest { return "Save copies to" }
         if defaultPreparationResult == .enrolledPaused { return "Prepared default · Saving paused" }
+        if defaultPreparationResult == .reservedRecovery || defaultPreparationResult == .unreservedRecovery {
+            return "Default folder kept for review"
+        }
         return proposesSupportedDefault ? "Proposed default" : "Selected for review"
     }
+    func showSetupDetails() {
+        guard isPresented, !isBusy, showsPausedSetup else { return }
+        isShowingSetupDetails = true
+    }
+
+    func dismissSetupDetails() { isShowingSetupDetails = false }
     var canContinue: Bool {
         guard isPresented, !isBusy else { return false }
         if step == .source, let result = defaultPreparationResult, !result.permitsRetry { return false }
@@ -172,6 +182,7 @@ final class ShotDropSetupModel {
     }
 
     func notNow() {
+        dismissSetupDetails()
         invalidate()
         sourceConfirmedByUser = false
         isPresented = false
@@ -179,6 +190,7 @@ final class ShotDropSetupModel {
     }
 
     func reopen() {
+        dismissSetupDetails()
         invalidate()
         defaultPreparationResult = nil
         step = .welcome

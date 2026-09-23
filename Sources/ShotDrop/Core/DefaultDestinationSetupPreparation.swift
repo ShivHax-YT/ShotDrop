@@ -24,6 +24,38 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
     }
 
     var permitsRetry: Bool { self == .retryable || self == .missingPictures }
+
+    var detailsActionTitle: String { self == .unsupported ? "View Requirements…" : "View Setup Details…" }
+
+    var detailsTitle: String {
+        switch self {
+        case .enrolledPaused: "Default folder prepared"
+        case .reviewRequired: "Review needed before saving"
+        case .reservedRecovery: "Storage reservation needs review"
+        case .unreservedRecovery: "Created folder needs review"
+        case .unsupported: "Default location unavailable"
+        case .missingPictures, .retryable: "Check paused"
+        }
+    }
+
+    var reviewGuidance: String {
+        switch self {
+        case .enrolledPaused:
+            "Earlier screenshot storage may exist in other locations. ShotDrop’s developer must provide a reviewed storage-accounting and processing update before saving can start. Keep this folder and its setup records intact."
+        case .reviewRequired:
+            "An existing folder or interrupted setup cannot be approved automatically. Ask ShotDrop’s developer to review this setup state before trying to prepare it again. Do not rename, replace, or delete the folder or its setup records."
+        case .reservedRecovery:
+            "Staging storage has already been reserved. Ask ShotDrop’s developer to review the preserved reservation and setup records. Creating another folder or removing those records cannot safely resume this setup."
+        case .unreservedRecovery:
+            "The folder was created, but staging storage was not reserved. Ask ShotDrop’s developer to review the preserved folder and setup records before another preparation attempt. Keep them intact."
+        case .unsupported:
+            "The default must be the exact Pictures/ShotDrop folder in the standard local /Users account home, on a writable internal APFS volume. Folder ownership, permissions, identity, and cloud checks must pass. ShotDrop cannot identify which requirement failed from this result. Ask ShotDrop’s developer to review compatibility with this Mac. No alternate location is approved by this setup path."
+        case .missingPictures:
+            "Restore your Pictures folder, then return to setup and retry the check."
+        case .retryable:
+            "Restore folder access or availability, then return to setup and retry the check."
+        }
+    }
 }
 
 protocol DefaultDestinationSetupPreparing: Sendable {

@@ -20,11 +20,11 @@ struct ShotDropSetupView: View {
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityTarget?
 
     private enum Control: Hashable {
-        case destinationPicker, sourcePicker, sourceConfirmation, primary
+        case destinationPicker, sourcePicker, sourceConfirmation, primary, detailsHeading, accessRecovery
     }
 
     private enum AccessibilityTarget: Hashable {
-        case heading(Int), destinationPicker, sourcePicker, status
+        case heading(Int), destinationPicker, sourcePicker, status, detailsHeading, primary
     }
 
     var body: some View {
@@ -88,12 +88,32 @@ struct ShotDropSetupView: View {
         .background(SetupWindowReader(reference: windowReference).frame(width: 0, height: 0))
         .onAppear { focusCurrentStep() }
         .onChange(of: model.step) { _, _ in focusCurrentStep() }
-        .onChange(of: model.defaultPreparationResult) { _, result in
-            if result != nil { accessibilityFocus = .status }
+        .onChange(of: model.defaultPreparationResult) { _, _ in
             if model.showsPausedSetup { keyboardFocus = .primary }
         }
         .onChange(of: model.isBusy) { _, busy in
             if !busy, needsStepKeyboardFocus { focusStepControl() }
+            if !busy, let message = recoveryMessage ?? model.statusMessage,
+               let window = windowReference.window {
+                let nextAction = model.sourceIssue != nil
+                    ? (model.sourceIssue == .denied ? "Open System Settings" : "Select Current Screenshot Folder")
+                    : (model.showsPausedSetup ? model.defaultPreparationResult?.detailsActionTitle ?? "" : model.primaryTitle)
+                NSAccessibility.post(element: window, notification: .announcementRequested,
+                                     userInfo: [.announcement: "\(message) \(nextAction)",
+                                                .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            }
+            if !busy, model.sourceIssue != nil {
+                keyboardFocus = model.sourceIssue == .denied ? .accessRecovery : .sourcePicker
+            }
+        }
+        .onChange(of: model.isShowingSetupDetails) { _, shown in
+            if !shown {
+                keyboardFocus = .primary
+                accessibilityFocus = .primary
+            }
+        }
+        .sheet(isPresented: Binding(get: { model.isShowingSetupDetails }, set: { if !$0 { model.dismissSetupDetails() } })) {
+            setupDetails
         }
         .accessibilityAction(.escape) { deferSetup() }
     }
@@ -227,6 +247,7 @@ struct ShotDropSetupView: View {
             .frame(minHeight: buttonHeight)
             .disabled(model.isBusy || choosingFolder)
             .accessibilityIdentifier("setup.openSystemSettings")
+            .focused($keyboardFocus, equals: .accessRecovery)
             paragraph("If Settings does not open, open it from the Apple menu. Retrying checks folder access; it may not show the macOS permission request again.")
                 .foregroundStyle(.secondary)
         }
@@ -250,9 +271,9 @@ struct ShotDropSetupView: View {
     }
 
     private var primaryAction: some View {
-        Button(model.showsPausedSetup ? "Close Setup" : model.primaryTitle) {
+        Button(model.showsPausedSetup ? model.defaultPreparationResult?.detailsActionTitle ?? "View Setup Details…" : model.primaryTitle) {
             if model.showsPausedSetup {
-                deferSetup()
+                model.showSetupDetails()
                 return
             }
             movingForward = true
@@ -266,7 +287,46 @@ struct ShotDropSetupView: View {
         .keyboardShortcut(.defaultAction)
         .disabled((!model.showsPausedSetup && !model.canContinue) || model.isBusy || choosingFolder)
         .focused($keyboardFocus, equals: .primary)
+        .accessibilityFocused($accessibilityFocus, equals: .primary)
         .accessibilityIdentifier("setup.continue")
+    }
+
+    private var setupDetails: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(model.defaultPreparationResult?.detailsTitle ?? "Saving is paused")
+                .font(.title2.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+                .focusable()
+                .focused($keyboardFocus, equals: .detailsHeading)
+                .accessibilityFocused($accessibilityFocus, equals: .detailsHeading)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let result = model.defaultPreparationResult {
+                        paragraph(result.message)
+                        if let destination = model.destinationURL {
+                            path(destination, label: model.destinationStatusLabel)
+                        }
+                        Text("Next step").fontWeight(.semibold).accessibilityAddTraits(.isHeader)
+                        paragraph(result.reviewGuidance)
+                        paragraph("Share this explanation with the developer through the channel where you received this build. Nothing is sent automatically. This build has no action that can approve this review or turn on saving.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Button("Close Details") { model.dismissSetupDetails() }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("setup.details.back")
+        }
+        .padding(24)
+        .frame(width: 480, height: 440)
+        .accessibilityIdentifier("setup.details")
+        .onAppear {
+            keyboardFocus = .detailsHeading
+            accessibilityFocus = .detailsHeading
+        }
+        .onExitCommand { model.dismissSetupDetails() }
     }
 
     private func paragraph(_ text: String) -> some View {

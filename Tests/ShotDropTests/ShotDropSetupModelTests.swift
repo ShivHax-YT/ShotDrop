@@ -26,17 +26,35 @@ final class ShotDropSetupModelTests: XCTestCase {
             XCTAssertEqual(model.defaultPreparationResult, result)
             XCTAssertEqual(model.canContinue, result.permitsRetry)
             XCTAssertEqual(model.showsPausedSetup, !result.permitsRetry)
-            XCTAssertEqual(model.destinationStatusLabel, result == .enrolledPaused
-                           ? "Prepared default · Saving paused" : "Proposed default")
+            let expectedLabel: String
+            switch result {
+            case .enrolledPaused: expectedLabel = "Prepared default · Saving paused"
+            case .reservedRecovery, .unreservedRecovery: expectedLabel = "Default folder kept for review"
+            default: expectedLabel = "Proposed default"
+            }
+            XCTAssertEqual(model.destinationStatusLabel, expectedLabel)
             XCTAssertFalse(model.canRunTest)
             XCTAssertEqual(model.step, .source)
+            model.showSetupDetails()
+            XCTAssertEqual(model.isShowingSetupDetails, !result.permitsRetry)
+            XCTAssertEqual(result.detailsActionTitle, result == .unsupported ? "View Requirements…" : "View Setup Details…")
+            XCTAssertFalse(result.reviewGuidance.isEmpty)
+            XCTAssertFalse(model.canRunTest)
+            XCTAssertEqual(model.defaultPreparationResult, result)
+            model.dismissSetupDetails()
+            XCTAssertFalse(model.isShowingSetupDetails)
             if !result.permitsRetry {
                 await model.continueSetup()
                 let unchangedCount = await preparer.count
                 XCTAssertEqual(unchangedCount, 1)
+                model.showSetupDetails()
                 model.notNow()
+                XCTAssertFalse(model.isShowingSetupDetails)
                 XCTAssertTrue(model.isDeferred)
                 XCTAssertFalse(model.isPresented)
+                XCTAssertFalse(model.canRunTest)
+                model.reopen()
+                XCTAssertFalse(model.isShowingSetupDetails)
                 XCTAssertFalse(model.canRunTest)
             }
         }
@@ -54,6 +72,8 @@ final class ShotDropSetupModelTests: XCTestCase {
         let count = await preparer.count
         XCTAssertEqual(count, 0)
         XCTAssertEqual(model.sourceIssue, .changed)
+        model.showSetupDetails()
+        XCTAssertFalse(model.isShowingSetupDetails)
     }
 
     func testSelectionAndWelcomeDoNotRequestAccess() async {
