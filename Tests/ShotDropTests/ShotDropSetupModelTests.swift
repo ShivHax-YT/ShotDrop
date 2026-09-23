@@ -25,8 +25,20 @@ final class ShotDropSetupModelTests: XCTestCase {
             XCTAssertEqual(after, 1)
             XCTAssertEqual(model.defaultPreparationResult, result)
             XCTAssertEqual(model.canContinue, result.permitsRetry)
+            XCTAssertEqual(model.showsPausedSetup, !result.permitsRetry)
+            XCTAssertEqual(model.destinationStatusLabel, result == .enrolledPaused
+                           ? "Prepared default · Saving paused" : "Proposed default")
             XCTAssertFalse(model.canRunTest)
             XCTAssertEqual(model.step, .source)
+            if !result.permitsRetry {
+                await model.continueSetup()
+                let unchangedCount = await preparer.count
+                XCTAssertEqual(unchangedCount, 1)
+                model.notNow()
+                XCTAssertTrue(model.isDeferred)
+                XCTAssertFalse(model.isPresented)
+                XCTAssertFalse(model.canRunTest)
+            }
         }
     }
 

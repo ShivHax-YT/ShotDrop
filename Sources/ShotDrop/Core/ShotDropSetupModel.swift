@@ -73,6 +73,14 @@ final class ShotDropSetupModel {
     var proposesSupportedDefault: Bool { destinationURL?.path == defaultPreparer?.proposedDestination.path && defaultPreparer != nil }
 
     var canGoBack: Bool { isPresented && step != .welcome }
+    var showsPausedSetup: Bool {
+        step == .source && defaultPreparationResult.map { !$0.permitsRetry } == true
+    }
+    var destinationStatusLabel: String {
+        if canRunTest { return "Save copies to" }
+        if defaultPreparationResult == .enrolledPaused { return "Prepared default · Saving paused" }
+        return proposesSupportedDefault ? "Proposed default" : "Selected for review"
+    }
     var canContinue: Bool {
         guard isPresented, !isBusy else { return false }
         if step == .source, let result = defaultPreparationResult, !result.permitsRetry { return false }

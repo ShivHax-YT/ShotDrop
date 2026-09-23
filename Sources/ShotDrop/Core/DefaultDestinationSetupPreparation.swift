@@ -7,7 +7,7 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
     var message: String {
         switch self {
         case .enrolledPaused:
-            "The default folder is enrolled. Saving remains paused until staging review and automatic processing are complete. Your originals stay in place."
+            "The default folder is prepared. Saving remains paused until existing staging storage has been accounted for and automatic processing is complete. Your originals stay in place."
         case .reviewRequired:
             "The default folder or an earlier setup attempt needs review. ShotDrop kept it intact. Automatic retry cannot approve or replace it."
         case .reservedRecovery:

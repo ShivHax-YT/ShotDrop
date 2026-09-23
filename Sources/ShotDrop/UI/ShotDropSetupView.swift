@@ -24,7 +24,7 @@ struct ShotDropSetupView: View {
     }
 
     private enum AccessibilityTarget: Hashable {
-        case heading(Int), destinationPicker, sourcePicker
+        case heading(Int), destinationPicker, sourcePicker, status
     }
 
     var body: some View {
@@ -50,6 +50,7 @@ struct ShotDropSetupView: View {
                             Image(systemName: "info.circle")
                         }
                         .accessibilityIdentifier("setup.status")
+                        .accessibilityFocused($accessibilityFocus, equals: .status)
                     }
                     if hasAccessDenial {
                         accessRecovery
@@ -87,6 +88,10 @@ struct ShotDropSetupView: View {
         .background(SetupWindowReader(reference: windowReference).frame(width: 0, height: 0))
         .onAppear { focusCurrentStep() }
         .onChange(of: model.step) { _, _ in focusCurrentStep() }
+        .onChange(of: model.defaultPreparationResult) { _, result in
+            if result != nil { accessibilityFocus = .status }
+            if model.showsPausedSetup { keyboardFocus = .primary }
+        }
         .onChange(of: model.isBusy) { _, busy in
             if !busy, needsStepKeyboardFocus { focusStepControl() }
         }
@@ -95,10 +100,11 @@ struct ShotDropSetupView: View {
 
     private var title: String {
         switch model.step {
-        case .welcome: "Screenshots, ready to paste and filed away."
+        case .welcome: "Prepare your screenshot folders"
         case .destination: "Where should screenshots go?"
         case .source:
-            if model.sourceIssue == .denied { "Screenshot folder access needed" }
+            if model.showsPausedSetup { "Saving is paused" }
+            else if model.sourceIssue == .denied { "Screenshot folder access needed" }
             else if model.sourceIssue == .missing || model.sourceIssue == .changed { "Screenshot folder unavailable" }
             else { model.isSourceLocationUnknown ? "Screenshot location unknown" : "Allow access to your screenshot folder." }
         case .test: model.canRunTest ? "Take a screenshot to try it." : "Saving checks are pending"
@@ -118,7 +124,7 @@ struct ShotDropSetupView: View {
                 ? "Pictures/ShotDrop is the proposed default on supported local setups. After you confirm the screenshot source, ShotDrop can check and prepare this folder. Saving stays paused until the remaining setup checks and automatic processing are complete."
                 : "This folder is selected for review. Choosing it does not approve automatic saving. ShotDrop will check access when you continue; macOS may ask for permission.")
             if let destination = model.destinationURL {
-                path(destination, label: model.proposesSupportedDefault ? "Proposed default" : "Selected for review")
+                path(destination, label: model.destinationStatusLabel)
             }
             Button("Choose Another Folder…") { chooseFolder(.destinationPicker) }
                 .frame(minHeight: buttonHeight)
@@ -165,7 +171,7 @@ struct ShotDropSetupView: View {
             paragraph("Choosing a folder here does not change where macOS saves screenshots.")
                 .foregroundStyle(.secondary)
             if let destination = model.destinationURL {
-                path(destination, label: "Save copies to")
+                path(destination, label: model.destinationStatusLabel)
             }
         case .test:
             if model.canRunTest {
@@ -176,7 +182,7 @@ struct ShotDropSetupView: View {
                 paragraph("Automatic copying and saving are not available in this build. Your save destination can be kept for later.")
             }
             if let destination = model.destinationURL {
-                path(destination, label: "Save copies to")
+                path(destination, label: model.destinationStatusLabel)
             }
             if let source = model.sourceURL {
                 path(source, label: "macOS screenshot folder")
@@ -244,7 +250,11 @@ struct ShotDropSetupView: View {
     }
 
     private var primaryAction: some View {
-        Button(model.primaryTitle) {
+        Button(model.showsPausedSetup ? "Close Setup" : model.primaryTitle) {
+            if model.showsPausedSetup {
+                deferSetup()
+                return
+            }
             movingForward = true
             Task { @MainActor in
                 await model.continueSetup()
@@ -254,7 +264,7 @@ struct ShotDropSetupView: View {
         .buttonStyle(.borderedProminent)
         .frame(minHeight: buttonHeight)
         .keyboardShortcut(.defaultAction)
-        .disabled(!model.canContinue || model.isBusy || choosingFolder)
+        .disabled((!model.showsPausedSetup && !model.canContinue) || model.isBusy || choosingFolder)
         .focused($keyboardFocus, equals: .primary)
         .accessibilityIdentifier("setup.continue")
     }
