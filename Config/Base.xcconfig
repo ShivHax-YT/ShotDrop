@@ -1,0 +1,7 @@
+// Local development works without a paid Apple account or configured team.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+// Optional, ignored by Git. Put stable Apple Development signing overrides here.
+#include? "Local.xcconfig"

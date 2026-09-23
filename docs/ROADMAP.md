@@ -3,8 +3,10 @@
 The implementor ticks boxes as items land. Each milestone ends with a QA pass.
 
 ## M0 — Scaffold
-- [ ] XcodeGen project.yml, menu bar app shell (LSUIElement), app icon placeholder, launch-at-login (SMAppService)
-- [ ] Settings window skeleton, unit test target, `make`-style build script in README
+- [x] XcodeGen project.yml, menu bar app shell (LSUIElement), app icon placeholder, launch-at-login (SMAppService)
+- [x] Settings window skeleton, unit test target, `make`-style build script in README
+
+M0 validation: Debug build and 9 unit tests pass; app process launched. GUI acceptance is pending QA because the computer-use surface timed out. Actual login-at-login behavior and stable-signing TCC persistence are not yet verified.
 ## M1 — Core pipeline
 - [ ] Detect new screenshots (NSMetadataQuery + FSEvents fallback), log latency
 - [ ] Auto-copy to clipboard (image + file URL options)
