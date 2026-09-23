@@ -10,6 +10,7 @@ final class RecentMenuController {
     private let previews: RecentPreviewCache
     private let validateRow: RowValidator
     private let settings: AppSettings
+    private let annotationEditor = AnnotationEditorCoordinator()
     private var records: [UUID: RecentHistoryRecord] = [:]
     private var rowTasks: [UUID: Task<Void, Never>] = [:]
     private var rowValidationTokens: [UUID: UUID] = [:]
@@ -103,6 +104,22 @@ final class RecentMenuController {
 
     func perform(_ id: UUID, _ action: RecentMenuAction) {
         guard let record = records[id], rows.first(where: { $0.id == id })?.allows(action) == true else { return }
+        if action == .annotate {
+            guard let reference = record.savedReference, reference.role == .savedCopy else { return }
+            Task {
+                guard let latest = try? await history.snapshot(),
+                      latest.records.first(where: { $0.captureID == id }) == record,
+                      records[id] == record else {
+                    status = "Entry changed; try again"
+                    return
+                }
+                let identity = AnnotationSessionIdentity(captureID: id, revision: record.revision, reference: reference)
+                if !annotationEditor.open(identity: identity) {
+                    status = "Finish the open annotation before editing another screenshot"
+                }
+            }
+            return
+        }
         if action == .cancelCopyText {
             if textCopy.activeID == id { textCopy.cancel() }
             return
@@ -177,7 +194,7 @@ final class RecentMenuController {
                 case .copyPreferred, .copyImage, .copyFile:
                     await copy(file, id: id, mode: copyMode(for: action), generation: requestGeneration,
                                clipboardToken: clipboardToken)
-                case .copyText, .cancelCopyText, .retryFileCheck, .removeFromRecents: break
+                case .copyText, .cancelCopyText, .annotate, .retryFileCheck, .removeFromRecents: break
                 }
             }
         }

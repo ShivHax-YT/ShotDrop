@@ -18,7 +18,7 @@ Anyone who screenshots all day: students, devs filing bugs, traders sharing char
 7. Onboarding that explains the Desktop/Documents folder permission prompt before macOS shows it.
 
 ## v1.1+
-- Quick annotate window: arrow, rectangle, highlight, blur/pixelate, text, crop. Copy-back on close.
+- Quick annotate window: arrow, rectangle, visual blur, text, and reversible crop. Explicit Save Copy or Save & Copy creates a separate verified PNG; ordinary close never copies. Production saving remains gated on the reviewed shared export path.
 - OCR: "Copy text from screenshot" (Vision framework, on-device).
 - Own capture hotkeys (region/window/fullscreen) using ScreenCaptureKit, as an alternative to the system shortcuts.
 - Pin screenshot as a floating always-on-top window.

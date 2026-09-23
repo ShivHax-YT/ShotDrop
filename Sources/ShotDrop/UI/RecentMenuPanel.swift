@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum RecentMenuAction: Sendable {
-    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
+    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, annotate, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
 }
 
 struct RecentMenuRow: Identifiable, Sendable {
@@ -22,7 +22,7 @@ struct RecentMenuRow: Identifiable, Sendable {
 
     func allows(_ action: RecentMenuAction) -> Bool {
         switch action {
-        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .revealSaved:
+        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .revealSaved:
             availability == .saved
         case .revealOriginal: availability == .sourceOnly
         case .retryFileCheck: availability == .unavailable || availability == .saved
@@ -251,6 +251,9 @@ struct RecentMenuPanel: View {
         .onDisappear { onRowVisible(row.id, false) }
         .contextMenu { actionItems(row) }
         .accessibilityActions {
+            if row.allows(.annotate) {
+                Button("Annotate \(row.displayName)") { onAction(row.id, .annotate) }
+            }
             if row.allows(.copyText) && !isRecognizingText && textCopyStates[row.id] != .unavailable {
                 Button(ScreenshotTextCopyState.accessibilityActionTitle(for: textCopyStates[row.id], filename: row.displayName)) {
                     onAction(row.id, .copyText)
@@ -269,6 +272,9 @@ struct RecentMenuPanel: View {
             .disabled(!row.allows(.open))
         Button("Copy Image") { onAction(row.id, .copyImage) }
             .disabled(!row.allows(.copyImage))
+        Button("Annotate…") { onAction(row.id, .annotate) }
+            .disabled(!row.allows(.annotate))
+            .accessibilityLabel("Annotate \(row.displayName)")
         Button("Copy File") { onAction(row.id, .copyFile) }
             .disabled(!row.allows(.copyFile))
         Button(ScreenshotTextCopyState.actionTitle(for: textCopyStates[row.id])) { onAction(row.id, .copyText) }

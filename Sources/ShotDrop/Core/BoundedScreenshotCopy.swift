@@ -173,6 +173,48 @@ struct BoundedScreenshotCopy: Sendable {
         }
     }
 
+    /// Writes a newly rendered payload without inheriting source metadata.
+    func writeRendered(_ data: Data, stageFD: Int32, outputToken: UUID,
+                       baseline: ScreenshotStagingBaseline) throws {
+        try Task.checkCancellation()
+        guard !data.isEmpty, data.count <= payloadLimit else {
+            throw Self.failure(.stagingPaused, "Rendered screenshot exceeds the payload limit.")
+        }
+        var stage = stat()
+        guard fstat(stageFD, &stage) == 0, stage.st_mode & S_IFMT == S_IFREG,
+              stage.st_size == 0, stage.st_nlink == 1, stage.st_mode & 0o7777 == 0o600 else {
+            throw Self.failure(.stagingPaused, "Rendered screenshot requires an empty private slot.")
+        }
+        try baseline.verify(stageFD)
+        guard try Self.attributes(stageFD) == baseline.attributeHashes else {
+            throw Self.failure(.stagingPaused, "Staging metadata differs from its enrolled baseline.")
+        }
+        let marker = Data(outputToken.uuidString.utf8)
+        guard baseline.chargedBytes + ScreenshotOutputMarker.attributeName.utf8.count + 1 + marker.count <= metadataLimit else {
+            throw Self.failure(.stagingPaused, "Rendered screenshot metadata exceeds its limit.")
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                try Task.checkCancellation()
+                let requested = min(256 * 1024, bytes.count - offset)
+                let count = write(stageFD, bytes.baseAddress!.advanced(by: offset), requested, off_t(offset))
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw Self.posixFailure("Write rendered screenshot")
+                }
+                guard count > 0, count <= requested else {
+                    throw Self.failure(.ioFailure, "Rendered screenshot write made invalid progress.")
+                }
+                offset += count
+            }
+        }
+        let result = marker.withUnsafeBytes {
+            fsetxattr(stageFD, ScreenshotOutputMarker.attributeName, $0.baseAddress, $0.count, 0, 0)
+        }
+        guard result == 0 else { throw Self.posixFailure("Write rendered screenshot marker") }
+    }
+
     /// Hashes actual metadata within the aggregate cap. Copying separately reserves
     /// capacity for its fresh output marker before it writes any stage bytes.
     static func attributes(_ descriptor: Int32) throws -> [String: Data] {

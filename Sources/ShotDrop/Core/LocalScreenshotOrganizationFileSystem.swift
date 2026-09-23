@@ -29,6 +29,27 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
         subdirectories: [String],
         expectedIdentity: ScreenshotFileIdentity?
     ) throws -> any ScreenshotStagedCopy {
+        try stage(source: source, destinationRoot: destinationRoot, subdirectories: subdirectories,
+                  expectedIdentity: expectedIdentity, renderedPNG: nil, expectedSourceDigest: nil)
+    }
+
+    /// Only the reviewed annotation adapter may call this after rendering and PNG validation.
+    /// It uses the same fixed lease, exclusive clone, verification and reset as capture saves.
+    func stageRenderedPNG(source: URL, destinationRoot: URL, expectedIdentity: ScreenshotFileIdentity,
+                          expectedSourceDigest: String, png: Data) throws -> any ScreenshotStagedCopy {
+        guard png.count <= ScreenshotStagingLimits.maximumPayloadBytes,
+              png.prefix(8).elementsEqual([137, 80, 78, 71, 13, 10, 26, 10]) else {
+            throw copyFailure(.verificationFailed, "Annotation output is not a bounded PNG.")
+        }
+        try AnnotationPNGContainer.validate(png)
+        return try stage(source: source, destinationRoot: destinationRoot, subdirectories: [],
+                         expectedIdentity: expectedIdentity, renderedPNG: png,
+                         expectedSourceDigest: expectedSourceDigest)
+    }
+
+    private func stage(source: URL, destinationRoot: URL, subdirectories: [String],
+                       expectedIdentity: ScreenshotFileIdentity?, renderedPNG: Data?,
+                       expectedSourceDigest: String?) throws -> any ScreenshotStagedCopy {
         guard source.isFileURL, destinationRoot.isFileURL else {
             throw copyFailure(.invalidName, "Screenshot paths must be local file URLs.")
         }
@@ -74,7 +95,8 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
         let staged = LocalStagedScreenshotCopy(
             source: source, sourceFD: sourceFD, initial: initial,
             directory: directoryURL, directoryFD: directoryFD, directories: directories,
-            lease: lease, fault: fault, race: race, clone: clone
+            lease: lease, fault: fault, race: race, clone: clone,
+            renderedPNG: renderedPNG, expectedSourceDigest: expectedSourceDigest
         )
         transferredLease = true
         ownsSource = false
@@ -131,6 +153,9 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     private let fault: @Sendable (ScreenshotCopyPhase) throws -> Void
     private let race: @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void
     private let clone: @Sendable (Int32, Int32, String) -> Int32
+    private let renderedPNG: Data?
+    private let expectedSourceDigest: String?
+    private var sourceAttributes: [String: Data]?
     private var stageOwned = true
     private var publishedURL: URL?
     private var outputFD: Int32 = -1
@@ -145,7 +170,10 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
          lease: ScreenshotStagingLease,
          fault: @escaping @Sendable (ScreenshotCopyPhase) throws -> Void,
          race: @escaping @Sendable (ScreenshotCopyRacePoint, URL) throws -> Void,
-         clone: @escaping @Sendable (Int32, Int32, String) -> Int32) {
+         clone: @escaping @Sendable (Int32, Int32, String) -> Int32,
+         renderedPNG: Data?, expectedSourceDigest: String?) {
+        self.renderedPNG = renderedPNG
+        self.expectedSourceDigest = expectedSourceDigest
         self.source = source
         self.sourceFD = sourceFD
         self.initial = initial
@@ -176,14 +204,21 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
         try verifyDirectories()
         let sourceAttributes = try BoundedScreenshotCopy.attributes(sourceFD)
         try lease.transition(.writing)
-        try BoundedScreenshotCopy().copy(sourceFD: sourceFD, stageFD: stageFD, outputToken: outputToken,
-                                         baseline: lease.baseline)
-        attributes = lease.baseline.expectedStageAttributes(sourceAttributes: sourceAttributes, outputToken: outputToken)
+        self.sourceAttributes = sourceAttributes
+        if let renderedPNG {
+            try BoundedScreenshotCopy().writeRendered(renderedPNG, stageFD: stageFD,
+                                                       outputToken: outputToken, baseline: lease.baseline)
+        } else {
+            try BoundedScreenshotCopy().copy(sourceFD: sourceFD, stageFD: stageFD, outputToken: outputToken,
+                                             baseline: lease.baseline)
+        }
+        attributes = lease.baseline.expectedStageAttributes(
+            sourceAttributes: renderedPNG == nil ? sourceAttributes : [:], outputToken: outputToken)
         identity = try CopyFileState.read(stageFD).identity
         try fault(.afterCopy)
         try fault(.beforeVerification)
         try verifySource()
-        digest = try copyDigest(sourceFD)
+        digest = try renderedPNG.map { Data(SHA256.hash(data: $0)) } ?? copyDigest(sourceFD)
         try verifyContents(stageFD)
         try verifySource()
         guard sourceAttributes == (try BoundedScreenshotCopy.attributes(sourceFD)) else {
@@ -289,6 +324,14 @@ private final class LocalStagedScreenshotCopy: ScreenshotStagedCopy {
     }
 
     private func verifySource() throws {
+        if let expectedSourceDigest {
+            let actual = try copyDigest(sourceFD).map { String(format: "%02x", $0) }.joined()
+            let currentAttributes = try BoundedScreenshotCopy.attributes(sourceFD)
+            guard actual == expectedSourceDigest,
+                  sourceAttributes == nil || sourceAttributes == currentAttributes else {
+                throw copyFailure(.sourceChanged, "Annotation source bytes or metadata changed; the original was retained.")
+            }
+        }
         let current = try CopyFileState.read(sourceFD)
         var pathInfo = stat()
         guard current == initial, lstat(source.path, &pathInfo) == 0,
