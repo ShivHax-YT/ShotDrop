@@ -16,7 +16,11 @@ Swift 6, SwiftUI + AppKit, menu bar app (`LSUIElement = YES`), XcodeGen project,
 `NSPasteboard.general`: write both `NSImage` (PNG/TIFF) and the file URL, configurable. Avoid huge memory spikes on 6K displays by writing PNG data lazily via `NSPasteboardItem` data providers.
 
 ## Rename / move
-`FileManager.moveItem`, collision-safe naming, preserve the metadata xattrs. Frontmost app: `NSWorkspace.shared.frontmostApplication` sampled at detection time. Store history in a small SQLite (GRDB) or JSON store.
+`ScreenshotOrganizer` stages a source-preserving copy in the destination directory. Source and destination descriptors remain pinned during copying; SHA256 streams in bounded chunks, metadata xattrs are verified, and `renameatx_np(RENAME_EXCL)` publishes without overwriting existing names. Collisions reuse the staged copy with numbered filenames. Originals are not deleted; optional cleanup belongs to v1.1. Directory and source identity checks reject path substitution. Post-publication failures retain the published copy and expose its recovery URL.
+
+Naming supports `{app}`, `{date}`, `{time}` and optional Gregorian `YYYY/MM` folders using the supplied time zone. Unknown/malformed tokens fail before I/O; filename components are sanitized and byte-limited. A pre-publication hook reserves the stage identity in `ScreenshotDetector.ignoreOutput` to prevent feedback when source and destination overlap. Neither service is activated from the app yet.
+
+Frontmost app: `NSWorkspace.shared.frontmostApplication` sampled at detection time is only a best-effort naming hint. History remains future work (small JSON store or SQLite).
 
 ## Permissions
 TCC "Desktop folder" access prompt when reading ~/Desktop. No Screen Recording permission is needed unless we add our own capture (ScreenCaptureKit) in v1.1.

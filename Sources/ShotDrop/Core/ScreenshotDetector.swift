@@ -177,6 +177,12 @@ actor ScreenshotDetector {
         logger.info("Screenshot detector stopped.")
     }
 
+    /// Reserve a staged output before it receives a visible name in the source folder.
+    /// The organizer exposes this identity before publication to prevent feedback loops.
+    func ignoreOutput(_ identity: ScreenshotFileIdentity) {
+        emitted.insert(identity)
+    }
+
     private func accepts(_ url: URL) -> Bool {
         guard let directory, url.isFileURL else { return false }
         let canonical = url.standardizedFileURL
