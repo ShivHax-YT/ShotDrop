@@ -1,0 +1,11 @@
+.fleet/bus/
+build/
+DerivedData/
+*.xcodeproj/
+xcuserdata/
+*.xcuserstate
+Config/Local.xcconfig
+.DS_Store
+
+__pycache__/
+*.py[cod]

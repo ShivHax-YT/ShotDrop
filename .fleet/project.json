@@ -1,0 +1,34 @@
+{
+  "name": "ShotDrop",
+  "slug": "shotdrop",
+  "min_macos": "14.0",
+  "roles": [
+    "main",
+    "report_manager",
+    "implementor",
+    "research",
+    "design",
+    "qa",
+    "review"
+  ],
+  "workers": [
+    "research",
+    "design",
+    "qa",
+    "review"
+  ],
+  "poll_seconds": {
+    "implementor": 300,
+    "main": 180,
+    "report_manager": 240,
+    "default": 240
+  },
+  "continuation_caps": {
+    "implementor": 600,
+    "main": 400,
+    "default": 300
+  },
+  "min_queue_depth": 3,
+  "proactive_after_beats": 2,
+  "bus_dir": "/Users/sharms18/Documents/Projects/MacFleet/apps/01-ShotDrop/.fleet/bus"
+}
