@@ -18,6 +18,7 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 subdirectories: [], expectedIdentity: nil
             )
             let error = try XCTUnwrap(failure { try stage.publish(named: "published.png") })
+            XCTAssertEqual(error.posixCode, ENOENT)
             let recovery = try XCTUnwrap(error.recoverableDestination)
             XCTAssertEqual(recovery.resolvingSymlinksInPath(),
                            moved.appendingPathComponent("published.png").resolvingSymlinksInPath())
@@ -62,6 +63,7 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 XCTAssertEqual(try Data(contentsOf: stageURL), fixture.bytes)
                 let error = try XCTUnwrap(failure { try stage.publish(named: "published.png") })
                 XCTAssertEqual(error.code, code == .EACCES ? .permissionDenied : .destinationUnavailable)
+                XCTAssertEqual(error.posixCode, code.rawValue)
                 XCTAssertNil(error.recoverableDestination)
                 XCTAssertFalse(FileManager.default.fileExists(
                     atPath: fixture.destination.appendingPathComponent("published.png").path
@@ -72,6 +74,58 @@ final class LocalScreenshotOrganizationFileSystemTests: XCTestCase {
                 XCTAssertEqual(try entries(fixture.destination), ["unrelated.png"])
                 try fixture.assertOriginal()
             }
+        }
+    }
+
+    func testDirectoryFailurePreservesNestedPOSIXCodeOverCocoaFallback() {
+        let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
+        let intermediate = NSError(domain: "FixtureWrapper", code: 7, userInfo: [NSUnderlyingErrorKey: posix])
+        let outer = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError,
+                            userInfo: [NSUnderlyingErrorKey: intermediate])
+        let failure = LocalScreenshotOrganizationFileSystem.directoryCreationFailure(outer)
+        XCTAssertEqual(failure.posixCode, ENOSPC)
+        XCTAssertEqual(failure.code, .destinationUnavailable)
+    }
+
+    func testDirectoryFailureUsesStructuredCocoaFallbacksOnly() {
+        let cases: [(Int, Int32)] = [
+            (NSFileWriteOutOfSpaceError, ENOSPC),
+            (NSFileWriteNoPermissionError, EACCES),
+            (NSFileWriteVolumeReadOnlyError, EROFS),
+            (NSFileWriteFileExistsError, EEXIST),
+            (NSFileNoSuchFileError, ENOENT)
+        ]
+        for (cocoaCode, posixCode) in cases {
+            let failure = LocalScreenshotOrganizationFileSystem.directoryCreationFailure(
+                NSError(domain: NSCocoaErrorDomain, code: cocoaCode)
+            )
+            XCTAssertEqual(failure.posixCode, posixCode)
+            XCTAssertEqual(failure.code, posixCode == EACCES ? .permissionDenied : .destinationUnavailable)
+        }
+        let unknown = NSError(domain: "UnrecognizedError", code: 99,
+                              userInfo: [NSLocalizedDescriptionKey: "No space left on device"])
+        XCTAssertNil(LocalScreenshotOrganizationFileSystem.directoryCreationFailure(unknown).posixCode)
+    }
+
+    func testPostPublicationRecoveryPreservesStructuredErrorCode() throws {
+        try withFixture { fixture in
+            let fileSystem = LocalScreenshotOrganizationFileSystem(fault: { phase in
+                if phase == .afterPublish {
+                    throw ScreenshotCopyFailure(code: .ioFailure, detail: "Injected flush failure", posixCode: ENOSPC)
+                }
+            })
+            let stage = try fileSystem.stageCopy(
+                source: fixture.source, destinationRoot: fixture.destination,
+                subdirectories: [], expectedIdentity: nil
+            )
+            let error = try XCTUnwrap(failure { try stage.publish(named: "published.png") })
+            XCTAssertEqual(error.code, .ioFailure)
+            XCTAssertEqual(error.posixCode, ENOSPC)
+            let recovery = try XCTUnwrap(error.recoverableDestination)
+            XCTAssertEqual(try Data(contentsOf: recovery), fixture.bytes)
+            stage.discard()
+            XCTAssertEqual(try Data(contentsOf: recovery), fixture.bytes)
+            try fixture.assertOriginal()
         }
     }
 

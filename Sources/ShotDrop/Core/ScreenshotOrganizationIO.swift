@@ -19,6 +19,7 @@ struct ScreenshotCopyFailure: Error, LocalizedError, Sendable {
     let code: Code
     let detail: String
     var recoverableDestination: URL? = nil
+    var posixCode: Int32? = nil
     var errorDescription: String? { detail }
 }
 

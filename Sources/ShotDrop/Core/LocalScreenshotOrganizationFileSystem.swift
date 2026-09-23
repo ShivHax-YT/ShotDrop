@@ -40,7 +40,11 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
         if let expectedIdentity, expectedIdentity != initial.identity {
             throw copyFailure(.sourceChanged, "Screenshot identity changed before copying.")
         }
-        try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        } catch {
+            throw Self.directoryCreationFailure(error)
+        }
         var directoryFD = open(destinationRoot.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directoryFD >= 0 else { throw posixCopyFailure(.destinationUnavailable, "Open destination") }
         var ownsDirectory = true
@@ -80,6 +84,40 @@ struct LocalScreenshotOrganizationFileSystem: ScreenshotOrganizationFileSystem {
         ownsDirectory = false
         try staged.prepare()
         return staged
+    }
+
+    /// Prefer an underlying POSIX error over a Foundation category; never parse display text.
+    static func directoryCreationFailure(_ error: Error) -> ScreenshotCopyFailure {
+        var current: NSError? = error as NSError
+        var visited = Set<ObjectIdentifier>()
+        var cocoaFallback: Int32?
+        var posixCode: Int32?
+        while let candidate = current, visited.count < 32,
+              visited.insert(ObjectIdentifier(candidate)).inserted {
+            if candidate.domain == NSPOSIXErrorDomain,
+               let code = Int32(exactly: candidate.code), code > 0 {
+                posixCode = code
+                break
+            }
+            if candidate.domain == NSCocoaErrorDomain, cocoaFallback == nil {
+                switch candidate.code {
+                case NSFileWriteOutOfSpaceError: cocoaFallback = ENOSPC
+                case NSFileWriteNoPermissionError, NSFileReadNoPermissionError: cocoaFallback = EACCES
+                case NSFileWriteVolumeReadOnlyError: cocoaFallback = EROFS
+                case NSFileWriteFileExistsError: cocoaFallback = EEXIST
+                case NSFileNoSuchFileError, NSFileReadNoSuchFileError: cocoaFallback = ENOENT
+                case NSFileWriteInvalidFileNameError: cocoaFallback = EINVAL
+                default: break
+                }
+            }
+            current = candidate.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let code = posixCode ?? cocoaFallback
+        return ScreenshotCopyFailure(
+            code: code == EACCES || code == EPERM ? .permissionDenied : .destinationUnavailable,
+            detail: "Create destination directory: \(error.localizedDescription)",
+            posixCode: code
+        )
     }
 }
 
@@ -383,6 +421,9 @@ private func copyFailure(_ code: ScreenshotCopyFailure.Code, _ detail: String) -
 
 private func posixCopyFailure(_ code: ScreenshotCopyFailure.Code, _ operation: String) -> ScreenshotCopyFailure {
     let saved = errno
-    return copyFailure(saved == EACCES || saved == EPERM ? .permissionDenied : code,
-                       "\(operation): \(String(cString: strerror(saved))).")
+    return ScreenshotCopyFailure(
+        code: saved == EACCES || saved == EPERM ? .permissionDenied : code,
+        detail: "\(operation): \(String(cString: strerror(saved))).",
+        posixCode: saved
+    )
 }
