@@ -7,6 +7,15 @@ import XCTest
 
 @MainActor
 final class AnnotationEditorTests: XCTestCase {
+    func testDisabledSaveAndDirtyCloseExplainReviewedSavePath() {
+        let reason = "This build cannot save annotated copies while ShotDrop’s save path is under review."
+        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+        XCTAssertEqual(AnnotationEditorModel.exportUnavailable,
+            reason + " Your original is unchanged. Keep this editor open to retain edits.")
+        XCTAssertEqual(AnnotationExportAvailability.dirtyCloseExplanation,
+            reason + " Unsaved edits will be lost if you discard them.")
+    }
+
     func testAxisAlignedArrowsAndUndoRedo() async throws {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

@@ -245,7 +245,7 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
               model.document?.isDirty == true else { return true }
         let alert = NSAlert()
         alert.messageText = "Keep your annotation edits?"
-        alert.informativeText = "Unsaved edits will be lost if you discard them. Saving annotations is not available yet."
+        alert.informativeText = AnnotationExportAvailability.dirtyCloseExplanation
         alert.addButton(withTitle: "Keep Editing")
         alert.addButton(withTitle: "Discard Edits")
         alert.addButton(withTitle: "Save Copy…")

@@ -27,7 +27,7 @@ enum ScreenshotTextCopyState: Equatable, Sendable {
         case .tooLarge: "Screenshot or text too large · Try a smaller saved image"
         case .failed: "Couldn’t recognize text · Try Copying Text Again"
         case .copyFailed: "Couldn’t copy text · Try Copying Text Again"
-        case .writeFailed: "Couldn’t copy text. Your clipboard may have changed."
+        case .writeFailed: "Copy failed; the clipboard may have been cleared. Try copying text again."
         case .cancelled: "Text recognition cancelled"
         case .clipboardChanged: "Clipboard changed · Try Copying Text Again"
         }

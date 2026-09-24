@@ -135,10 +135,26 @@ final class ScreenshotTextCopyTests: XCTestCase {
             let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
             writer.failRepresentation = !failWrite; writer.failWrite = failWrite
             let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-            controller.start(record) { _ in true }; await worker.waitForStart()
+            var feedback: [ScreenshotTextCopyState] = []
+            controller.start(record, onStateChange: { feedback.append($0) }) { _ in true }
+            await worker.waitForStart()
             await worker.finish(.success("text")); await controller.waitForIdle()
             XCTAssertEqual(controller.states[record.captureID], failWrite ? .writeFailed : .copyFailed)
             XCTAssertEqual(writer.events, failWrite ? ["prepare", "write"] : [])
+            let failure = try XCTUnwrap(controller.states[record.captureID])
+            XCTAssertEqual(feedback.last, failure)
+            XCTAssertEqual(failure.message, failWrite
+                ? "Copy failed; the clipboard may have been cleared. Try copying text again."
+                : "Couldn’t copy text · Try Copying Text Again")
+            XCTAssertTrue(failure.offersRetry)
+            XCTAssertEqual(ScreenshotTextCopyState.actionTitle(for: failure), "Try Copying Text Again")
+            XCTAssertEqual(writer.changeCount, failWrite ? 1 : 0)
+            writer.failRepresentation = false; writer.failWrite = false
+            XCTAssertTrue(controller.start(record) { _ in true })
+            await worker.waitForStart()
+            await worker.finish(.success("retried text")); await controller.waitForIdle()
+            XCTAssertEqual(controller.states[record.captureID], .copied)
+            XCTAssertEqual(writer.item?.string(forType: .string), "retried text")
         }
     }
 
