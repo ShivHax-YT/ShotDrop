@@ -22,9 +22,9 @@ enum DefaultDestinationPreparationResult: Sendable, Equatable {
         case .retryable:
             "The default folder could not be checked. Restore access or availability, then retry the check. Saving remains paused."
         case .cloudStatusUnknown:
-            "ShotDrop could not confirm whether this folder is stored in iCloud. Keep the folder in place and retry when it is accessible. Saving remains paused."
+            "ShotDrop could not verify the Pictures folder’s iCloud status for default-location eligibility. Keep Pictures in place and retry when it is accessible. Saving remains paused."
         case .providerStatusUnknown:
-            "ShotDrop could not confirm whether another storage provider manages this folder. Keep the folder in place and retry when it is accessible. Saving remains paused."
+            "ShotDrop could not verify whether a storage provider manages the Pictures folder for default-location eligibility. Keep Pictures in place and retry when it is accessible. Saving remains paused."
         }
     }
 

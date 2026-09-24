@@ -7,12 +7,106 @@ final class ShotDropSetupModelTests: XCTestCase {
     private let source = URL(fileURLWithPath: "/fixture/source", isDirectory: true)
     private let destination = URL(fileURLWithPath: "/fixture/destination", isDirectory: true)
 
+    func testBusyLabelNamesActualDefaultPreparationAndClearsAfterCompletion() async {
+        let preparer = SetupSuspendedPreparer(proposedDestination: destination)
+        let model = ShotDropSetupModel(destinationURL: destination, service: SetupServiceFixture(), defaultPreparer: preparer)
+        await model.continueSetup(); await model.continueSetup()
+        model.confirmCurrentSource(true)
+        XCTAssertEqual(model.busyOperationTitle, "Checking folder access…")
+        let task = Task { await model.continueSetup() }
+        for _ in 0..<1000 {
+            if await preparer.isSuspended { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(model.isBusy)
+        XCTAssertEqual(model.busyOperationTitle, "Preparing default folder…")
+        await preparer.resume()
+        await task.value
+        XCTAssertFalse(model.isBusy)
+        XCTAssertFalse(model.isPreparingDefaultFolder)
+        XCTAssertNil(model.inlineStatusMessage)
+        XCTAssertEqual(model.pausedResultMessage, DefaultDestinationPreparationResult.enrolledPaused.message)
+    }
+
+    func testInvalidDestinationRequiresPickerAndCannotRepeatCheckAtEitherStage() async {
+        for issue in [ShotDropSetupAccessIssue.missing, .changed, .unsupported, .unsafe] {
+            for atSource in [false, true] {
+                let service = SetupServiceFixture()
+                let model: ShotDropSetupModel
+                if atSource {
+                    model = await sourceStep(service: service)
+                    await service.setSeparationFailure(issue)
+                } else {
+                    model = ShotDropSetupModel(destinationURL: destination, service: service)
+                    await model.continueSetup()
+                    await service.setDestinationFailure(issue)
+                }
+                await model.continueSetup()
+                XCTAssertTrue(model.destinationRequiresReselection)
+                XCTAssertFalse(model.canContinue)
+                XCTAssertEqual(model.primaryTitle, "Choose Another Save Folder…")
+                let before = await service.calls
+                await model.continueSetup()
+                let after = await service.calls
+                XCTAssertEqual(before, after)
+                model.selectDestination(URL(fileURLWithPath: "/fixture/new-destination"))
+                XCTAssertFalse(model.destinationRequiresReselection)
+                XCTAssertTrue(model.canContinue)
+            }
+        }
+    }
+
+    func testInvalidSourceRequiresPickerAndCannotRepeatCheck() async {
+        for issue in [ShotDropSetupAccessIssue.missing, .changed, .unsupported, .unsafe] {
+            let service = SetupServiceFixture()
+            let model = await sourceStep(service: service)
+            await service.setSourceFailure(issue)
+            await model.continueSetup()
+            XCTAssertTrue(model.sourceRequiresReselection)
+            XCTAssertFalse(model.canContinue)
+            XCTAssertEqual(model.primaryTitle, "Select Current Screenshot Folder…")
+            let before = await service.calls
+            model.confirmCurrentSource(true)
+            await model.continueSetup()
+            let after = await service.calls
+            XCTAssertEqual(before, after)
+            model.selectSource(source)
+            model.confirmCurrentSource(true)
+            XCTAssertTrue(model.canContinue)
+        }
+    }
+
+    func testDestinationAccessAndAvailabilityRemainRetryable() async {
+        for issue in [ShotDropSetupAccessIssue.denied, .unavailable] {
+            let service = SetupServiceFixture()
+            await service.setDestinationFailure(issue)
+            let model = ShotDropSetupModel(destinationURL: destination, service: service)
+            await model.continueSetup(); await model.continueSetup()
+            XCTAssertFalse(model.destinationRequiresReselection)
+            XCTAssertTrue(model.canContinue)
+            XCTAssertEqual(model.primaryTitle, "Retry")
+            await service.setDestinationFailure(nil)
+            await model.continueSetup()
+            XCTAssertEqual(model.step, .source)
+            model.confirmCurrentSource(true)
+            await service.setSeparationFailure(issue)
+            await model.continueSetup()
+            XCTAssertTrue(model.canContinue)
+            XCTAssertEqual(model.primaryTitle, "Retry")
+            await service.setSeparationFailure(nil)
+            await model.continueSetup()
+            XCTAssertTrue(model.showsPausedSetup)
+        }
+    }
+
     func testAlternateUnavailableReadinessHasStableDetailsAndSurvivesDeferral() async {
         let service = SetupServiceFixture()
         let gate = SetupGateFixture(destination: false, pipeline: false, review: false)
         let model = await sourceStep(service: service, gate: gate)
         await model.continueSetup()
         XCTAssertTrue(model.showsPausedSetup)
+        XCTAssertNil(model.inlineStatusMessage)
+        XCTAssertEqual(model.pausedResultMessage, model.pausedSetupMessage)
         XCTAssertFalse(model.canContinue)
         XCTAssertFalse(model.canRunTest)
         model.showSetupDetails()
@@ -68,6 +162,15 @@ final class ShotDropSetupModelTests: XCTestCase {
             XCTAssertEqual(model.statusMessage, result.message)
             if result == .cloudStatusUnknown { XCTAssertTrue(model.statusMessage?.contains("iCloud") == true) }
             if result == .providerStatusUnknown { XCTAssertTrue(model.statusMessage?.contains("storage provider") == true) }
+            if result == .cloudStatusUnknown || result == .providerStatusUnknown {
+                XCTAssertTrue(result.message.contains("Pictures folder"))
+                XCTAssertTrue(result.message.contains("default-location eligibility"))
+                XCTAssertFalse(result.message.contains("this folder"))
+            }
+            if !result.permitsRetry {
+                XCTAssertNil(model.inlineStatusMessage)
+                XCTAssertEqual(model.pausedResultMessage, result.message)
+            }
             XCTAssertEqual(model.canContinue, result.permitsRetry)
             XCTAssertEqual(model.showsPausedSetup, !result.permitsRetry)
             let expectedLabel: String
@@ -284,9 +387,9 @@ final class ShotDropSetupModelTests: XCTestCase {
         await model.continueSetup()
         model.goBack()
         model.confirmCurrentSource(true)
-        await service.setSourceFailure(.changed)
+        await service.setSourceFailure(.unavailable)
         await model.continueSetup()
-        XCTAssertEqual(model.sourceIssue, .changed)
+        XCTAssertEqual(model.sourceIssue, .unavailable)
         XCTAssertTrue(model.canContinue)
         XCTAssertEqual(model.primaryTitle, "Retry")
         await service.setSourceFailure(nil)
@@ -460,6 +563,18 @@ final class ShotDropSetupModelTests: XCTestCase {
         }
         XCTFail("Source check did not suspend")
     }
+}
+
+private actor SetupSuspendedPreparer: DefaultDestinationSetupPreparing {
+    nonisolated let proposedDestination: URL
+    private var continuation: CheckedContinuation<Void, Never>?
+    var isSuspended: Bool { continuation != nil }
+    init(proposedDestination: URL) { self.proposedDestination = proposedDestination }
+    func prepare(source: ShotDropSetupDirectoryIdentity) async -> DefaultDestinationPreparationResult {
+        await withCheckedContinuation { continuation = $0 }
+        return .enrolledPaused
+    }
+    func resume() { continuation?.resume(); continuation = nil }
 }
 
 private actor SetupDefaultPreparerFixture: DefaultDestinationSetupPreparing {

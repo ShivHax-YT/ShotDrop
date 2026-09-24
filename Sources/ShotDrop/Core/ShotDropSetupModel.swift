@@ -39,6 +39,7 @@ final class ShotDropSetupModel {
     private(set) var destinationURL: URL?
     private(set) var sourceURL: URL?
     private(set) var isBusy = false
+    private(set) var isPreparingDefaultFolder = false
     private(set) var isPresented = true
     private(set) var isDeferred = false
     private(set) var sourceConfirmedByUser = false
@@ -75,6 +76,17 @@ final class ShotDropSetupModel {
     var proposesSupportedDefault: Bool { destinationURL?.path == defaultPreparer?.proposedDestination.path && defaultPreparer != nil }
 
     var canGoBack: Bool { isPresented && step != .welcome }
+    var destinationRequiresReselection: Bool { Self.requiresReselection(destinationIssue) }
+    var sourceRequiresReselection: Bool { requiresSourceSelection || Self.requiresReselection(sourceIssue) }
+    private static func requiresReselection(_ issue: ShotDropSetupAccessIssue?) -> Bool {
+        switch issue {
+        case .missing, .changed, .unsupported, .unsafe: true
+        case .denied, .unavailable, nil: false
+        }
+    }
+    var busyOperationTitle: String { isPreparingDefaultFolder ? "Preparing default folder…" : "Checking folder access…" }
+    var inlineStatusMessage: String? { showsPausedSetup ? nil : statusMessage }
+    var pausedResultMessage: String { defaultPreparationResult?.message ?? pausedSetupMessage }
     var showsPausedSetup: Bool {
         step == .source && (alternateReadinessPaused || defaultPreparationResult.map { !$0.permitsRetry } == true)
     }
@@ -100,16 +112,21 @@ final class ShotDropSetupModel {
         if showsPausedSetup { return false }
         switch step {
         case .welcome: return true
-        case .destination: return destinationURL != nil
-        case .source: return destinationURL != nil && sourceURL != nil && sourceConfirmedByUser && !requiresSourceSelection
+        case .destination: return destinationURL != nil && !destinationRequiresReselection
+        case .source: return destinationURL != nil && sourceURL != nil && sourceConfirmedByUser
+            && !sourceRequiresReselection && !destinationRequiresReselection
         case .test: return canRunTest
         }
     }
     var primaryTitle: String {
-        switch step {
+        if step == .destination || step == .source {
+            if destinationRequiresReselection { return "Choose Another Save Folder…" }
+            if step == .source, sourceRequiresReselection { return "Select Current Screenshot Folder…" }
+        }
+        return switch step {
         case .welcome: "Continue"
         case .destination: proposesSupportedDefault ? "Review Default Setup" : (destinationIssue == nil ? "Use This Folder" : "Retry")
-        case .source: proposesSupportedDefault ? (defaultPreparationResult == nil ? "Prepare Default Folder" : "Retry Check") : (sourceIssue == nil ? "Continue" : "Retry")
+        case .source: proposesSupportedDefault ? (defaultPreparationResult == nil ? "Prepare Default Folder" : "Retry Check") : (sourceIssue == nil && destinationIssue == nil ? "Continue" : "Retry")
         case .test: "Done"
         }
     }
@@ -137,6 +154,7 @@ final class ShotDropSetupModel {
         alternateReadinessPaused = false
         sourceURL = url
         sourceIssue = nil
+        if destinationIssue == .unsafe { destinationIssue = nil }
         requiresSourceSelection = false
         isSourceLocationUnknown = false
         expectedSourceIdentity = nil
@@ -306,8 +324,10 @@ final class ShotDropSetupModel {
             return
         }
         if proposesSupportedDefault, let defaultPreparer {
+            isPreparingDefaultFolder = true
             let result = await defaultPreparer.prepare(source: sourceIdentity)
             guard isCurrent(token) else { return }
+            isPreparingDefaultFolder = false
             defaultPreparationResult = result
             destinationNeedsReview = true
             statusMessage = result.message
@@ -351,6 +371,7 @@ final class ShotDropSetupModel {
         operation?.cancel()
         operation = nil
         isBusy = false
+        isPreparingDefaultFolder = false
         verifiedBinding = nil
         readiness = nil
     }

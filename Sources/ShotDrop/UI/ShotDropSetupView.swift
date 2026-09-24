@@ -49,7 +49,7 @@ struct ShotDropSetupView: View {
                         .accessibilityFocused($accessibilityFocus, equals: .heading(model.step.rawValue))
                         .accessibilityIdentifier("setup.heading")
                     stepContent
-                    if let message = recoveryMessage ?? model.statusMessage, !message.isEmpty {
+                    if !model.showsPausedSetup, let message = recoveryMessage ?? model.inlineStatusMessage, !message.isEmpty {
                         Label {
                             Text(message)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -70,7 +70,7 @@ struct ShotDropSetupView: View {
                             .accessibilityIdentifier("setup.recoverDestination")
                     }
                     if model.isBusy {
-                        ProgressView("Checking folder access…")
+                        ProgressView(model.busyOperationTitle)
                             .controlSize(.small)
                             .accessibilityIdentifier("setup.progress")
                     }
@@ -118,25 +118,29 @@ struct ShotDropSetupView: View {
         }
         .onChange(of: model.isBusy) { _, busy in
             if !busy, needsStepKeyboardFocus { focusStepControl() }
-            if !busy, let message = recoveryMessage ?? model.statusMessage,
+            if !busy, let message = announcementMessage,
                let window = windowReference.window {
                 let nextAction: String
                 if model.showsPausedSetup {
                     nextAction = model.defaultPreparationResult?.detailsActionTitle ?? "View Setup Details"
-                } else if let issue = model.destinationIssue {
-                    nextAction = issue == .denied ? "Open System Settings" : "Choose Another Save Folder"
-                } else if model.sourceIssue != nil {
-                    nextAction = model.sourceIssue == .denied ? "Open System Settings" : "Select Current Screenshot Folder"
+                } else if model.destinationRequiresReselection {
+                    nextAction = "Choose Another Save Folder"
+                } else if model.sourceRequiresReselection {
+                    nextAction = "Select Current Screenshot Folder"
+                } else if model.destinationIssue == .denied || model.sourceIssue == .denied {
+                    nextAction = "Open System Settings"
                 } else { nextAction = model.primaryTitle }
                 NSAccessibility.post(element: window, notification: .announcementRequested,
                                      userInfo: [.announcement: "\(message) \(nextAction)",
                                                 .priority: NSAccessibilityPriorityLevel.high.rawValue])
             }
             if !busy, model.showsPausedSetup { keyboardFocus = .primary }
-            else if !busy, model.destinationIssue != nil {
-                keyboardFocus = model.destinationIssue == .denied ? .accessRecovery : .destinationPicker
-            } else if !busy, model.sourceIssue != nil {
-                keyboardFocus = model.sourceIssue == .denied ? .accessRecovery : .sourcePicker
+            else if !busy, model.destinationRequiresReselection { keyboardFocus = .destinationPicker }
+            else if !busy, model.sourceRequiresReselection { keyboardFocus = .sourcePicker }
+            else if !busy, model.destinationIssue == .denied || model.sourceIssue == .denied {
+                keyboardFocus = .accessRecovery
+            } else if !busy, model.destinationIssue == .unavailable || model.sourceIssue == .unavailable {
+                keyboardFocus = .primary
             }
         }
         .onChange(of: model.isShowingSetupDetails) { _, shown in
@@ -172,8 +176,10 @@ struct ShotDropSetupView: View {
 
     private var nextActionHint: String? {
         if choosingFolder { return "Choose a folder in the dialog, or cancel to return to setup." }
-        if model.isBusy { return "Checking the selected folders. You can choose Not Now to stop setup." }
+        if model.isBusy { return "You can choose Not Now to stop setup." }
         if model.showsPausedSetup { return "Open setup details to see what needs attention. Saving remains paused." }
+        if model.destinationRequiresReselection { return "Choose another save folder before continuing." }
+        if model.sourceRequiresReselection { return "Select the current screenshot folder again before continuing." }
         if model.step == .source, !model.canContinue {
             if model.requiresSourceSelection || model.sourceURL == nil {
                 return "Select the current screenshot folder to continue."
@@ -244,7 +250,7 @@ struct ShotDropSetupView: View {
                 .foregroundStyle(.secondary)
         case .source:
             if model.showsPausedSetup {
-                paragraph(model.defaultPreparationResult?.message ?? model.pausedSetupMessage)
+                paragraph(model.pausedResultMessage)
                 if let destination = model.destinationURL { path(destination, label: model.destinationStatusLabel) }
                 paragraph("Open setup details for the next step. You can use Back to review your folders, or Not Now to return to the menu.")
                     .foregroundStyle(.secondary)
@@ -309,6 +315,12 @@ struct ShotDropSetupView: View {
                 path(source, label: "macOS screenshot folder")
             }
         }
+    }
+
+    private var announcementMessage: String? {
+        model.showsPausedSetup
+            ? (model.pausedResultMessage)
+            : (recoveryMessage ?? model.statusMessage)
     }
 
     private var recoveryMessage: String? {
@@ -495,9 +507,16 @@ struct ShotDropSetupView: View {
         needsStepKeyboardFocus = false
         switch model.step {
         case .welcome, .test: keyboardFocus = .primary
-        case .destination: keyboardFocus = model.proposesSupportedDefault ? .primary : .destinationPicker
+        case .destination:
+            if model.destinationRequiresReselection { keyboardFocus = .destinationPicker }
+            else if model.destinationIssue == .denied { keyboardFocus = .accessRecovery }
+            else { keyboardFocus = model.proposesSupportedDefault ? .primary : .destinationPicker }
         case .source:
-            keyboardFocus = model.showsPausedSetup ? .primary : (model.sourceURL == nil ? .sourcePicker : .sourceConfirmation)
+            if model.showsPausedSetup { keyboardFocus = .primary }
+            else if model.destinationRequiresReselection { keyboardFocus = .destinationPicker }
+            else if model.sourceRequiresReselection || model.sourceURL == nil { keyboardFocus = .sourcePicker }
+            else if model.destinationIssue == .denied || model.sourceIssue == .denied { keyboardFocus = .accessRecovery }
+            else { keyboardFocus = .sourceConfirmation }
         }
     }
 

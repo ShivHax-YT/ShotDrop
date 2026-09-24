@@ -89,7 +89,7 @@ struct RecentMenuPanel: View {
 
             Divider()
             footer
-                .frame(height: 44)
+                .frame(minHeight: 72)
         }
         .frame(width: 352, height: min(560, max(0, availableHeight - 32)))
         .background(.regularMaterial)
@@ -186,7 +186,6 @@ struct RecentMenuPanel: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Finish Setup…", action: onFinishSetup)
         }
         .frame(maxWidth: .infinity, minHeight: 160)
         .padding(.horizontal, 24)
@@ -194,12 +193,12 @@ struct RecentMenuPanel: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             HStack {
-                if !rows.isEmpty {
-                    Button("Clear History") { clearRequested = true }
-                        .help("Remove recent entries. Screenshot files remain in their folders.")
-                }
+                Button("Finish Setup…", action: onFinishSetup)
+                    .fontWeight(.semibold)
+                    .accessibilityIdentifier("recent.finishSetup")
+                    .help("Resume ShotDrop setup")
                 Spacer(minLength: 4)
                 Button("Pins (\(pinCount))", action: onManagePins)
                     .help("Show or close pinned screenshots")
@@ -208,12 +207,19 @@ struct RecentMenuPanel: View {
                 Button("Settings…", action: onOpenSettings)
                     .keyboardShortcut(",")
                 Spacer(minLength: 4)
+                if !rows.isEmpty {
+                    Button("Clear History") { clearRequested = true }
+                        .help("Remove recent entries. Screenshot files remain in their folders.")
+                    Spacer(minLength: 4)
+                }
                 Button("Quit") { NSApplication.shared.terminate(nil) }
                     .keyboardShortcut("q")
             }
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .accessibilityIdentifier("recent.footer")
     }
 
     private func rowView(_ row: RecentMenuRow) -> some View {
