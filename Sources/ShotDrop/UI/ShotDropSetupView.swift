@@ -329,9 +329,7 @@ struct ShotDropSetupView: View {
             case .denied:
                 return "ShotDrop can’t read screenshots saved to \(source.path). Your screenshots remain there."
             case .missing, .changed:
-                return model.requiresSourceSelection
-                    ? "The macOS screenshot location changed. Check Shift–Command–5 > Options > Save to, then select the current folder explicitly."
-                    : "The folder macOS uses for screenshots moved or is unavailable. Retry checks the same folder; it does not choose a replacement."
+                return model.sourceReselectionMessage
             default: break
             }
         }

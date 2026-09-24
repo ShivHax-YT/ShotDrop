@@ -73,6 +73,12 @@ final class ShotDropSetupModelTests: XCTestCase {
             XCTAssertTrue(model.sourceRequiresReselection)
             XCTAssertFalse(model.canContinue)
             XCTAssertEqual(model.primaryTitle, "Select Current Screenshot Folder…")
+            if issue == .missing || issue == .changed {
+                XCTAssertFalse(model.requiresSourceSelection)
+                XCTAssertEqual(model.sourceReselectionMessage,
+                    "The folder macOS uses for screenshots moved or is unavailable. Select Current Screenshot Folder to choose its current location, then confirm it.")
+                XCTAssertFalse(model.sourceReselectionMessage.contains("Retry"))
+            }
             XCTAssertTrue(model.canPerformPrimaryAction)
             XCTAssertEqual(model.primaryAction, .chooseSource)
             let before = await service.calls

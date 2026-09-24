@@ -78,6 +78,11 @@ final class ShotDropSetupModel {
     var canGoBack: Bool { isPresented && step != .welcome }
     var destinationRequiresReselection: Bool { Self.requiresReselection(destinationIssue) }
     var sourceRequiresReselection: Bool { requiresSourceSelection || Self.requiresReselection(sourceIssue) }
+    var sourceReselectionMessage: String {
+        requiresSourceSelection
+            ? "The macOS screenshot location changed. Check Shift–Command–5 > Options > Save to, then select the current folder explicitly."
+            : "The folder macOS uses for screenshots moved or is unavailable. Select Current Screenshot Folder to choose its current location, then confirm it."
+    }
     private static func requiresReselection(_ issue: ShotDropSetupAccessIssue?) -> Bool {
         switch issue {
         case .missing, .changed, .unsupported, .unsafe: true
