@@ -175,13 +175,112 @@ final class AnnotationEditorTests: XCTestCase {
         model.endGesture(); model.close()
     }
 
-    private func fixture() throws -> (directory: URL,url: URL,identity: AnnotationSessionIdentity) {
+    func testAccessibleCreationSupportsAllMarksAndUndoWithoutPointerGesture() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = AnnotationEditorModel(identity: fixture.identity)
+        XCTAssertFalse(model.canAddSelectedTool)
+        model.load(); await model.finishPendingWork()
+        for tool in [AnnotationTool.arrow, .rectangle, .blur, .text] {
+            model.tool = tool
+            XCTAssertTrue(model.canAddSelectedTool)
+            model.addSelectedTool()
+            let mark = try XCTUnwrap(model.document?.state.marks.last)
+            XCTAssertEqual(mark.tool, tool)
+            XCTAssertEqual(model.selected, mark.id)
+            XCTAssertTrue(try XCTUnwrap(model.document?.state.crop).contains(mark.bounds))
+        }
+        XCTAssertEqual(model.document?.state.marks.count, 4)
+        model.undo()
+        XCTAssertEqual(model.document?.state.marks.count, 3)
+        model.redo()
+        XCTAssertEqual(model.document?.state.marks.count, 4)
+        await model.finishPendingWork()
+        model.close()
+        XCTAssertFalse(model.canAddSelectedTool)
+    }
+
+    func testAccessibleCropBoundsValidateAndApplyReversiblyIncludingOnePixelCrop() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = AnnotationEditorModel(identity: fixture.identity)
+        model.load(); await model.finishPendingWork()
+        let original = try XCTUnwrap(model.document?.state)
+        model.tool = .crop; model.addSelectedTool()
+        let draft = try XCTUnwrap(model.cropDraft)
+        XCTAssertEqual(model.document?.state, original)
+        model.changeCropDraft { $0.size.width = -1 }
+        XCTAssertEqual(model.cropDraft, draft)
+        model.changeCropDraft { $0.origin.x = CGFloat.nan }
+        XCTAssertEqual(model.cropDraft, draft)
+        model.changeCropDraft { $0.origin.x = 0.5 }
+        XCTAssertEqual(model.cropDraft, draft)
+        model.changeCropDraft { $0.size.width = 1000 }
+        XCTAssertEqual(model.cropDraft, draft)
+        model.changeCropDraft { $0 = CGRect(x: 31, y: 31, width: 1, height: 1) }
+        model.applyCrop()
+        XCTAssertEqual(model.document?.state.crop, CGRect(x: 31, y: 31, width: 1, height: 1))
+        model.tool = .rectangle; model.addSelectedTool()
+        XCTAssertEqual(model.document?.state.marks.last?.bounds, CGRect(x: 31, y: 31, width: 1, height: 1))
+        model.undo(); model.undo()
+        XCTAssertEqual(model.document?.state, original)
+        await model.finishPendingWork(); model.close()
+    }
+
+    func testRedoAvailabilityIncludesGestureAndCropWithoutRedoHistory() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = AnnotationEditorModel(identity: fixture.identity)
+        model.load(); await model.finishPendingWork()
+        XCTAssertFalse(model.canRedo)
+        model.beginGesture(); XCTAssertTrue(model.canRedo)
+        model.redo(); XCTAssertFalse(model.gestureActive); XCTAssertFalse(model.canRedo)
+        model.tool = .crop; model.addSelectedTool()
+        XCTAssertTrue(model.canRedo)
+        model.redo(); XCTAssertNil(model.cropDraft); XCTAssertFalse(model.canRedo)
+        XCTAssertFalse(try XCTUnwrap(model.document).isDirty)
+        model.close()
+    }
+
+    func testAccessibleCreationHonorsMarkLimitAndSelectDoesNotCreate() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = AnnotationEditorModel(identity: fixture.identity)
+        model.load(); await model.finishPendingWork()
+        model.addSelectedTool()
+        XCTAssertEqual(model.document?.state.marks.count, 0)
+        model.tool = .rectangle
+        for _ in 0..<AnnotationDocument.maximumMarks { model.addSelectedTool() }
+        XCTAssertFalse(model.canAddSelectedTool)
+        model.addSelectedTool()
+        XCTAssertEqual(model.document?.state.marks.count, AnnotationDocument.maximumMarks)
+        model.tool = .crop
+        XCTAssertTrue(model.canAddSelectedTool)
+        model.addSelectedTool(); XCTAssertNotNil(model.cropDraft)
+        await model.finishPendingWork(); model.close()
+    }
+
+    func testAccessibleCreationOnOnePixelSourceNeverExceedsExtent() async throws {
+        let fixture = try fixture(width: 1, height: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = AnnotationEditorModel(identity: fixture.identity)
+        model.load(); await model.finishPendingWork()
+        for tool in [AnnotationTool.arrow, .rectangle, .blur, .text] {
+            model.tool = tool; model.addSelectedTool()
+            XCTAssertEqual(model.document?.state.marks.last?.bounds, CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        model.tool = .crop; model.addSelectedTool()
+        XCTAssertEqual(model.cropDraft, CGRect(x: 0, y: 0, width: 1, height: 1))
+        await model.finishPendingWork(); model.close()
+    }
+
+    private func fixture(width: Int = 32, height: Int = 32) throws -> (directory: URL,url: URL,identity: AnnotationSessionIdentity) {
         let directory = try resolvedStagingTemporaryDirectory().appendingPathComponent("annotation-editor-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory,withIntermediateDirectories: false)
         let url = directory.appendingPathComponent("source.png")
-        let bitmap = try XCTUnwrap(CGContext(data:nil,width:32,height:32,bitsPerComponent:8,bytesPerRow:128,
+        let bitmap = try XCTUnwrap(CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:width * 4,
             space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
-        bitmap.setFillColor(CGColor(gray:1,alpha:1)); bitmap.fill(CGRect(x:0,y:0,width:32,height:32))
+        bitmap.setFillColor(CGColor(gray:1,alpha:1)); bitmap.fill(CGRect(x:0,y:0,width:width,height:height))
         let data = NSMutableData()
         let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data,UTType.png.identifier as CFString,1,nil))
         CGImageDestinationAddImage(destination,try XCTUnwrap(bitmap.makeImage()),nil)

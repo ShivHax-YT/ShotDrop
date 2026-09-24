@@ -112,6 +112,41 @@ final class AnnotationRendererTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(small.width, 16); XCTAssertEqual(small.height, 12)
     }
 
+    func testVisualBlurPreservesUniformTransparencyAndPixelsOutsideSelection() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.url.deletingLastPathComponent()) }
+        // Premultiplied RGBA: a uniform colored image with 50 percent opacity.
+        // Gaussian blur should leave this image unchanged, including its alpha.
+        let pixel: [UInt8] = [64, 32, 16, 128]
+        let source = AnnotationSource(reference: fixture.reference, width: 64, height: 48,
+                                      rgba: Data(Array(repeating: pixel, count: 64 * 48).flatMap { $0 }))
+        let renderer = AnnotationRenderer()
+        var state = try AnnotationDocument(width: source.width, height: source.height).state
+        let baseline = try await renderer.preview(source: source, state: state)
+        var blur = AnnotationMark(tool: .blur, start: CGPoint(x: 16, y: 12), end: CGPoint(x: 48, y: 36))
+        blur.blurRadius = 8
+        state.marks = [blur]
+        let result = try await renderer.preview(source: source, state: state)
+        for y in 0..<48 {
+            for x in 0..<64 {
+                let offset = (y * 64 + x) * 4
+                let inside = (16..<48).contains(x) && (12..<36).contains(y)
+                for channel in 0..<4 {
+                    let original = Int(baseline.rgba[offset + channel])
+                    let actual = Int(result.rgba[offset + channel])
+                    if inside {
+                        // Allow one quantization unit for the Core Image round trip.
+                        XCTAssertLessThanOrEqual(abs(actual - original), 1,
+                            "Blur changed a uniform translucent pixel at \(x),\(y), channel \(channel)")
+                    } else {
+                        XCTAssertEqual(actual, original, "Blur touched pixels outside its selection")
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(baseline.rgba[(24 * 64 + 32) * 4 + 3], 128)
+    }
+
     func testSourceRoleCannotOpenAnnotationSession() async throws {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.url.deletingLastPathComponent()) }

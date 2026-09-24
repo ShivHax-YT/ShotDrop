@@ -114,6 +114,45 @@ final class AnnotationEditorModel {
         let mark = AnnotationMark(tool: tool, start: start, end: end)
         state.marks.append(mark); selected = mark.id; commit(state)
     }
+    var canRedo: Bool { gestureActive || cropDraft != nil || document?.redoStates.isEmpty == false }
+    var canAddSelectedTool: Bool {
+        guard !closed, !busy, let document, tool != .select else { return false }
+        return tool == .crop || document.state.marks.count < AnnotationDocument.maximumMarks
+    }
+    /// Keyboard and assistive-technology entry point; geometry remains in upright source pixels.
+    func addSelectedTool() {
+        guard canAddSelectedTool, var state = document?.state else { return }
+        cancelGesture()
+        let crop = state.crop
+        let width = max(1, min(160, floor(crop.width / 2)))
+        let height = max(1, min(100, floor(crop.height / 2)))
+        let initial = CGRect(x: floor(crop.midX - width / 2), y: floor(crop.midY - height / 2),
+                             width: width, height: height)
+        if tool == .crop {
+            cropDraft = initial
+            announceResult?("Crop preview created. Adjust its source-pixel bounds, then choose Apply Crop or Cancel Crop.")
+        } else {
+            let mark = AnnotationMark(tool: tool, start: initial.origin,
+                                      end: CGPoint(x: initial.maxX, y: initial.maxY))
+            state.marks.append(mark)
+            commit(state)
+            if document?.state.marks.contains(where: { $0.id == mark.id }) == true {
+                selected = mark.id
+                announceResult?("Added " + mark.tool.rawValue + ". Adjust the selected object's properties.")
+            }
+        }
+    }
+    func changeCropDraft(_ change: (inout CGRect) -> Void) {
+        guard var next = cropDraft, let document, !closed else { return }
+        change(&next)
+        let values = [next.origin.x, next.origin.y, next.size.width, next.size.height]
+        guard values.allSatisfy({ $0.isFinite }), next.size.width >= 1, next.size.height >= 1,
+              next == next.integral, document.state.crop.contains(next) else {
+            message = "Crop bounds must use whole source pixels inside the current image. The previous crop preview is preserved."
+            return
+        }
+        cropDraft = next
+    }
     func applyCrop() {
         guard let cropDraft, var state = document?.state else { return }
         state.crop = cropDraft; self.cropDraft = nil; commit(state)
@@ -240,7 +279,7 @@ private struct AnnotationEditorView: View {
                         ForEach(AnnotationTool.allCases) { Text($0.rawValue).tag($0) }
                     }.pickerStyle(.segmented).frame(minWidth: 510)
                     Button("Undo", action: model.undo).keyboardShortcut("z").disabled(model.document?.undoStates.isEmpty != false && !model.gestureActive && model.cropDraft == nil)
-                    Button("Redo", action: model.redo).keyboardShortcut("z", modifiers: [.command,.shift]).disabled(model.document?.redoStates.isEmpty != false)
+                    Button("Redo", action: model.redo).keyboardShortcut("z", modifiers: [.command,.shift]).disabled(!model.canRedo)
                 }.padding(10)
             }.fixedSize(horizontal: false, vertical: true)
             Divider()
@@ -343,6 +382,14 @@ private struct AnnotationEditorView: View {
     private var properties: some View {
         ScrollView {
             VStack(alignment: .leading,spacing: 12) {
+                if model.tool != .select {
+                    Button(model.tool == .crop ? "Create Crop Preview" : "Add " + model.tool.rawValue,
+                           action: model.addSelectedTool)
+                        .disabled(!model.canAddSelectedTool)
+                        .accessibilityHint("Creates a centered region that you can adjust with source-pixel controls below.")
+                    Text("Coordinates use source pixels, measured from the bottom-left of the image.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Objects").font(.headline)
                 ForEach(model.document?.state.marks ?? []) { mark in
                     Button { model.selected = mark.id; model.tool = .select } label: {
@@ -374,8 +421,12 @@ private struct AnnotationEditorView: View {
                     HStack { Button("←") {model.moveSelected(dx:-1,dy:0)}.accessibilityLabel("Move left one pixel"); Button("→") {model.moveSelected(dx:1,dy:0)}.accessibilityLabel("Move right one pixel"); Button("↑") {model.moveSelected(dx:0,dy:1)}.accessibilityLabel("Move up one pixel"); Button("↓") {model.moveSelected(dx:0,dy:-1)}.accessibilityLabel("Move down one pixel") }
                     Button("Delete Object",action: model.deleteSelected)
                 }
-                if model.cropDraft != nil {
+                if let crop = model.cropDraft {
                     Divider(); Text("Crop preview").font(.headline)
+                    coordinate("Crop X", value: crop.minX) { value in model.changeCropDraft { $0.origin.x = value } }
+                    coordinate("Crop Y", value: crop.minY) { value in model.changeCropDraft { $0.origin.y = value } }
+                    coordinate("Crop Width", value: crop.width) { value in model.changeCropDraft { $0.size.width = value } }
+                    coordinate("Crop Height", value: crop.height) { value in model.changeCropDraft { $0.size.height = value } }
                     Button("Apply Crop",action: model.applyCrop)
                     Button("Cancel Crop",action: model.cancelGesture)
                 }

@@ -124,6 +124,9 @@ actor AnnotationRenderer {
                     .cropped(to: bounds)
                 guard let image = context.createCGImage(blurred, from: bounds, format: .RGBA8, colorSpace: Self.colorSpace) else { throw AnnotationFailure.renderingFailed }
                 canvas.clip(to: mark.bounds)
+                // Replace the filtered pixels. Source-over would composite a translucent
+                // snapshot onto itself, incorrectly increasing opacity within the blur.
+                canvas.setBlendMode(.copy)
                 canvas.draw(image, in: state.crop)
             case .select, .crop: throw AnnotationFailure.invalidGeometry
             }

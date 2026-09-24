@@ -122,6 +122,46 @@ final class AnnotationExportTests: XCTestCase {
         XCTAssertThrowsError(try AnnotationPNGContainer.validate(truncated))
     }
 
+    func testPNGContainerDrainsHighlyCompressedImageAcrossOutputBufferBoundaries() throws {
+        let png = try AnnotationExportFixture.png(red: 0.5, includeMetadata: false, width: 512, height: 512)
+        XCTAssertLessThan(png.count, 64 * 1024)
+        XCTAssertNoThrow(try AnnotationPNGContainer.validate(png))
+    }
+
+    func testPNGContainerRejectsCorruptIDATEvenWithRecomputedChunkCRC() throws {
+        let fixture = try AnnotationExportFixture()
+        defer { fixture.cleanUp() }
+        var cursor = 8
+        var range: Range<Int>?
+        while cursor + 12 <= fixture.rendered.count {
+            let count = fixture.rendered[cursor..<(cursor + 4)].reduce(0) { ($0 << 8) | Int($1) }
+            if String(data: fixture.rendered[(cursor + 4)..<(cursor + 8)], encoding: .ascii) == "IDAT" {
+                range = cursor..<(cursor + count + 12); break
+            }
+            cursor += count + 12
+        }
+        let chunkRange = try XCTUnwrap(range)
+        var badCRC = fixture.rendered
+        badCRC[chunkRange.lowerBound + 8] ^= 0xFF
+        XCTAssertThrowsError(try AnnotationPNGContainer.validate(badCRC))
+        // Correct PNG CRC but invalid compressed stream: container framing alone
+        // and a lazy CGImage must never qualify this as a verified export.
+        for payload in [Data([0, 0, 0, 0]), Data([0x78, 0x9C, 0x03, 0]) ] {
+            var corrupt = fixture.rendered
+            corrupt.replaceSubrange(chunkRange, with: Self.chunk("IDAT", payload: payload))
+            XCTAssertThrowsError(try AnnotationPNGContainer.validate(corrupt)) {
+                XCTAssertEqual($0 as? AnnotationFailure, .invalidImage)
+            }
+            XCTAssertThrowsError(try AnnotationPNGContainer.cleanEncoderOutput(corrupt))
+            let before = try fixture.slots.map { try Data(contentsOf: $0) }
+            XCTAssertThrowsError(try LocalScreenshotOrganizationFileSystem(pool: fixture.pool).stageRenderedPNG(
+                source: fixture.source, destinationRoot: fixture.destination, expectedIdentity: fixture.identity,
+                expectedSourceDigest: SHA256.hash(data: fixture.original).map { String(format: "%02x", $0) }.joined(), png: corrupt))
+            XCTAssertEqual(try fixture.slots.map { try Data(contentsOf: $0) }, before)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.destination.path), [])
+        }
+    }
+
     func testExportServiceCollisionInSourceDirectoryNeverOverwritesOriginal() async throws {
         let fixture = try AnnotationExportFixture(destinationIsSource: true)
         defer { fixture.cleanUp() }
@@ -345,12 +385,12 @@ private struct AnnotationExportFixture {
         return UInt64(info.st_ino)
     }
 
-    private static func png(red: CGFloat, includeMetadata: Bool) throws -> Data {
+    fileprivate static func png(red: CGFloat, includeMetadata: Bool, width: Int = 4, height: Int = 3) throws -> Data {
         let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
-        let context = try XCTUnwrap(CGContext(data: nil, width: 4, height: 3, bitsPerComponent: 8,
-            bytesPerRow: 16, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.setFillColor(CGColor(red: red, green: 0.5, blue: 0.25, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 4, height: 3))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         let image = try XCTUnwrap(context.makeImage())
         let data = NSMutableData()
         let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil))
