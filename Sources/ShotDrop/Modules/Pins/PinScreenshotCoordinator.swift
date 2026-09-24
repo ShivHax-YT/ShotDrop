@@ -1,34 +1,21 @@
 import AppKit
 
-/// Geometry uses global desktop coordinates, including screens left/below the primary display.
-enum PinPanelGeometry {
-    static func clamp(_ frame: CGRect, to visible: CGRect) -> CGRect {
-        let safe = visible.insetBy(dx: min(12, visible.width / 4), dy: min(12, visible.height / 4))
-        let size = CGSize(width: min(frame.width, safe.width, visible.width * 0.7),
-                          height: min(frame.height, safe.height, visible.height * 0.7))
-        return CGRect(x: min(max(frame.minX, safe.minX), safe.maxX - size.width),
-                      y: min(max(frame.minY, safe.minY), safe.maxY - size.height),
-                      width: size.width, height: size.height)
-    }
+/// The same native panel is revealed differently for explicit intent and passive completion.
+@MainActor
+protocol PinPanelPresentationTarget: AnyObject {
+    func orderFront(_ sender: Any?)
+    func makeKeyAndOrderFront(_ sender: Any?)
+}
+extension NSPanel: PinPanelPresentationTarget {}
 
-    static func placement(size: CGSize, visible: CGRect, occupied: [CGRect]) -> CGRect {
-        var frame = clamp(CGRect(x: visible.maxX - size.width - 12, y: visible.minY + 12,
-                                 width: size.width, height: size.height), to: visible)
-        for other in occupied.sorted(by: { $0.minY < $1.minY }) where frame.intersects(other) {
-            frame.origin.y = other.maxY + 12
+@MainActor
+enum PinPanelPresentation {
+    enum Intent { case passiveLoad, explicitShow }
+    static func present(_ panel: any PinPanelPresentationTarget, intent: Intent) {
+        switch intent {
+        case .passiveLoad: panel.orderFront(nil)
+        case .explicitShow: panel.makeKeyAndOrderFront(nil)
         }
-        if frame.maxY > visible.maxY - 12 {
-            frame.origin = CGPoint(x: visible.maxX - frame.width - 12 - CGFloat(occupied.count) * 24,
-                                   y: visible.maxY - frame.height - 12 - CGFloat(occupied.count) * 24)
-        }
-        return clamp(frame, to: visible)
-    }
-
-    static func imageSize(width: Int, height: Int, backingScale: CGFloat, zoom: CGFloat) -> CGSize {
-        let scale = max(1, backingScale)
-        let boundedZoom = min(4, max(0.25, zoom))
-        return CGSize(width: CGFloat(width) / scale * boundedZoom,
-                      height: CGFloat(height) / scale * boundedZoom)
     }
 }
 
@@ -237,6 +224,7 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
     var onOpenRecents: (() -> Void)?
     var onCapacityReached: (() -> Void)?
     private var closeAllGeneration: UInt64 = 0
+    private var adjustingGeometry = false
     private(set) var status: String? { didSet { onChange?() } }
     var items: [Item] { names.map { Item(id: $0.key, filename: $0.value) }.sorted { $0.filename < $1.filename } }
 
@@ -247,6 +235,8 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
         workspaceNotifications.addObserver(self, selector: #selector(displaysChanged),
             name: NSWorkspace.didWakeNotification, object: nil)
     }
@@ -309,7 +299,11 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
 
     func managePins() { onManagePins?() }
     func openRecents() { onOpenRecents?() }
-    func show(_ token: UUID) { panels[token]?.orderFront(nil) }
+    func show(_ token: UUID) {
+        guard let panel = panels[token] else { return }
+        refreshGeometry(panel)
+        PinPanelPresentation.present(panel, intent: .explicitShow)
+    }
     func close(_ token: UUID) {
         if let identity = identities.removeValue(forKey: token) { onFeedback?(identity, .closed) }
         names.removeValue(forKey: token)
@@ -332,8 +326,14 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
               let token = panels.first(where: { $0.value === panel })?.key else { return }
         close(token)
     }
-    func windowDidChangeBackingProperties(_ notification: Notification) {
-        ((notification.object as? NSWindow)?.contentViewController as? PinPanelContent)?.updateImageSize()
+    func windowDidChangeBackingProperties(_ notification: Notification) { refreshGeometry(notification) }
+    func windowDidChangeScreen(_ notification: Notification) { refreshGeometry(notification) }
+    func windowDidMove(_ notification: Notification) { refreshGeometry(notification) }
+    func windowDidResize(_ notification: Notification) { refreshGeometry(notification) }
+
+    private func refreshGeometry(_ notification: Notification) {
+        guard let panel = notification.object as? PinReferencePanel else { return }
+        refreshGeometry(panel)
     }
 
     private func present(_ snapshot: PinScreenshotSnapshot, token: UUID, filename: String, pointer: CGPoint) {
@@ -379,7 +379,7 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
         panels[token] = panel
         status = nil
         onFeedback?(snapshot.identity, .shown)
-        panel.orderFront(nil) // Passive completion never activates the application or makes a key window.
+        PinPanelPresentation.present(panel, intent: .passiveLoad)
     }
 
     private func perform(_ action: PinScreenshotAction, snapshot: PinScreenshotSnapshot, token: UUID) {
@@ -398,20 +398,18 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
     }
 
     @objc private func displaysChanged() {
-        let screens = NSScreen.screens
-        guard let fallback = screens.first else { return }
-        for panel in panels.values {
-            // Preserve a reachable pin's display rather than following the pointer on every event.
-            let screen = screens.max { left, right in
-                intersectionArea(panel.frame, left.visibleFrame) < intersectionArea(panel.frame, right.visibleFrame)
-            } ?? fallback
-            panel.maxSize = CGSize(width: screen.visibleFrame.width * 0.7, height: screen.visibleFrame.height * 0.7)
-            panel.setFrame(PinPanelGeometry.clamp(panel.frame, to: screen.visibleFrame), display: true)
-            (panel.contentViewController as? PinPanelContent)?.updateImageSize()
-        }
+        for panel in panels.values { refreshGeometry(panel) }
     }
-    private func intersectionArea(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        let rect = a.intersection(b)
-        return rect.isNull ? 0 : rect.width * rect.height
+    private func refreshGeometry(_ panel: PinReferencePanel) {
+        guard !adjustingGeometry else { return }
+        let screens = NSScreen.screens
+        guard let recovery = PinPanelGeometry.recovery(frame: panel.frame,
+            visibleFrames: screens.map(\.visibleFrame), currentVisibleFrame: panel.screen?.visibleFrame) else { return }
+        adjustingGeometry = true
+        defer { adjustingGeometry = false }
+        // Update the cap even when preserving an already reachable user position.
+        panel.maxSize = recovery.maximumSize
+        if panel.frame != recovery.frame { panel.setFrame(recovery.frame, display: true) }
+        (panel.contentViewController as? PinPanelContent)?.updateImageSize()
     }
 }

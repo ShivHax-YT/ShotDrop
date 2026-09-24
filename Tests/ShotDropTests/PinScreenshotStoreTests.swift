@@ -125,6 +125,48 @@ final class PinScreenshotStoreTests: XCTestCase, @unchecked Sendable {
         await store.closeAll()
     }
 
+    func testRepeatedRealDecodeAndCloseCyclesReleaseCacheWithoutChangingSavedFile() async throws {
+        let directory = try physicalTemporaryDirectory().appendingPathComponent("pin-cycles-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("saved.png")
+        let bitmap = try XCTUnwrap(CGContext(data: nil, width: 1024, height: 512,
+            bitsPerComponent: 8, bytesPerRow: 4096, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        bitmap.setFillColor(CGColor(gray: 0.5, alpha: 1))
+        bitmap.fill(CGRect(x: 0, y: 0, width: 1024, height: 512))
+        let encoded = NSMutableData()
+        let encoder = try XCTUnwrap(CGImageDestinationCreateWithData(encoded, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(encoder, try XCTUnwrap(bitmap.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(encoder))
+        try (encoded as Data).write(to: url)
+        let reference = try RecentFileReference.capture(at: url, role: .savedCopy)
+        let identities = (0..<3).map { _ in PinScreenshotIdentity(captureID: UUID(), revision: 1, reference: reference) }
+        let store = PinScreenshotStore()
+        let start = ContinuousClock.now
+        for _ in 0..<20 {
+            for identity in identities {
+                let token = try opened(try await store.admit(identity))
+                let snapshot = try await store.snapshot(for: token)
+                XCTAssertEqual(snapshot.image.rgba.count, 1024 * 512 * 4)
+                let duplicate = try await store.admit(identity)
+                XCTAssertEqual(duplicate, .existing(token))
+            }
+            let full = await store.statistics()
+            XCTAssertEqual(full.sessions, 3)
+            XCTAssertEqual(full.cachedBytes, 3 * 1024 * 512 * 4)
+            XCTAssertEqual(full.runningJobs, 0)
+            await store.closeAll()
+            let empty = await store.statistics()
+            XCTAssertEqual(empty.sessions, 0)
+            XCTAssertEqual(empty.cachedBytes, 0)
+            XCTAssertEqual(empty.runningJobs, 0)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), encoded as Data)
+        XCTAssertEqual(try RecentFileReference.capture(at: url, role: .savedCopy).sha256, reference.sha256)
+        print("PIN_STORE_CYCLES cycles=20 native_decodes=60 retained_peak_bytes=6291456 retained_after_close=0 elapsed=\(start.duration(to: .now))")
+    }
+
     private static func snapshot(_ identity: PinScreenshotIdentity) -> PinScreenshotSnapshot {
         PinScreenshotSnapshot(identity: identity,
             image: RecentPreviewImage(width: 1, height: 1, bytesPerRow: 4, rgba: Data([0, 0, 0, 255])),
