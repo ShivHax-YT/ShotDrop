@@ -24,11 +24,15 @@ final class PinScreenshotStoreTests: XCTestCase, @unchecked Sendable {
     func testClosingBlockedDecoderRetainsCapacityAndCannotResurrect() async throws {
         let started = expectation(description: "Native worker entered")
         let gate = DispatchSemaphore(value: 0)
+        let firstInvocation = PinDecoderFirstInvocation()
+        defer { gate.signal() }
         let first = try identity()
         let store = PinScreenshotStore { identity in
-            if identity == first {
+            if identity == first, firstInvocation.take() {
                 started.fulfill()
-                _ = gate.wait(timeout: .now() + 10)
+                guard gate.wait(timeout: .now() + 10) == .success else {
+                    throw PinScreenshotFailure.closed
+                }
             }
             return Self.snapshot(identity)
         }
@@ -50,7 +54,8 @@ final class PinScreenshotStoreTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? PinScreenshotFailure, .closed) }
         let after = await store.statistics()
         XCTAssertEqual(after.sessions, 2)
-        _ = try opened(try await store.admit(first))
+        let retry = try opened(try await store.admit(first))
+        _ = try await store.snapshot(for: retry)
         await store.closeAll()
     }
 
@@ -201,4 +206,16 @@ final class PinScreenshotStoreTests: XCTestCase, @unchecked Sendable {
         return URL(fileURLWithPath: String(cString: path), isDirectory: true)
     }
 
+}
+
+private final class PinDecoderFirstInvocation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var available = true
+    func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard available else { return false }
+        available = false
+        return true
+    }
 }
