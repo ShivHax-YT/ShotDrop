@@ -398,20 +398,18 @@ struct ShotDropSetupView: View {
 
     private var primaryAction: some View {
         Button(model.showsPausedSetup ? model.defaultPreparationResult?.detailsActionTitle ?? "View Setup Details…" : model.primaryTitle) {
-            if model.showsPausedSetup {
-                model.showSetupDetails()
-                return
-            }
             movingForward = true
             Task { @MainActor in
-                await model.continueSetup()
+                await model.performPrimaryAction(
+                    chooseDestination: { chooseFolder(.destinationPicker) },
+                    chooseSource: { chooseFolder(.sourcePicker) })
                 if !model.isPresented && !model.isDeferred { onClose() }
             }
         }
         .buttonStyle(.borderedProminent)
         .frame(minHeight: buttonHeight)
         .keyboardShortcut(.defaultAction)
-        .disabled((!model.showsPausedSetup && !model.canContinue) || model.isBusy || choosingFolder)
+        .disabled(!model.canPerformPrimaryAction || choosingFolder)
         .focused($keyboardFocus, equals: .primary)
         .accessibilityFocused($accessibilityFocus, equals: .primary)
         .accessibilityIdentifier("setup.continue")

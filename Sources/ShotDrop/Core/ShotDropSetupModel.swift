@@ -107,6 +107,30 @@ final class ShotDropSetupModel {
     }
 
     func dismissSetupDetails() { isShowingSetupDetails = false }
+    enum PrimaryAction { case continueSetup, chooseDestination, chooseSource, details }
+    var primaryAction: PrimaryAction {
+        if showsPausedSetup { return .details }
+        if step == .destination || step == .source {
+            if destinationRequiresReselection { return .chooseDestination }
+            if step == .source, sourceRequiresReselection { return .chooseSource }
+        }
+        return .continueSetup
+    }
+    var canPerformPrimaryAction: Bool {
+        guard isPresented, !isBusy else { return false }
+        return primaryAction == .continueSetup ? canContinue : true
+    }
+    /// The view and tests share dispatch, so a picker-named action cannot recheck
+    /// the invalid selection or accidentally prepare a destination.
+    func performPrimaryAction(chooseDestination: () -> Void, chooseSource: () -> Void) async {
+        guard canPerformPrimaryAction else { return }
+        switch primaryAction {
+        case .chooseDestination: chooseDestination()
+        case .chooseSource: chooseSource()
+        case .details: showSetupDetails()
+        case .continueSetup: await continueSetup()
+        }
+    }
     var canContinue: Bool {
         guard isPresented, !isBusy else { return false }
         if showsPausedSetup { return false }

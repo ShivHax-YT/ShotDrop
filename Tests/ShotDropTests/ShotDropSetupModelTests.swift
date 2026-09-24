@@ -19,6 +19,8 @@ final class ShotDropSetupModelTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(model.isBusy)
+        XCTAssertFalse(model.canPerformPrimaryAction)
+        await model.performPrimaryAction(chooseDestination: { XCTFail("Busy picker") }, chooseSource: { XCTFail("Busy picker") })
         XCTAssertEqual(model.busyOperationTitle, "Preparing default folder…")
         await preparer.resume()
         await task.value
@@ -45,7 +47,13 @@ final class ShotDropSetupModelTests: XCTestCase {
                 XCTAssertTrue(model.destinationRequiresReselection)
                 XCTAssertFalse(model.canContinue)
                 XCTAssertEqual(model.primaryTitle, "Choose Another Save Folder…")
+                XCTAssertTrue(model.canPerformPrimaryAction)
+                XCTAssertEqual(model.primaryAction, .chooseDestination)
                 let before = await service.calls
+                var pickerCalls = 0
+                await model.performPrimaryAction(chooseDestination: { pickerCalls += 1 }, chooseSource: { XCTFail("Wrong picker") })
+                XCTAssertEqual(pickerCalls, 1)
+                XCTAssertFalse(model.canContinue, "Opening/cancelling a picker cannot authorize a recheck")
                 await model.continueSetup()
                 let after = await service.calls
                 XCTAssertEqual(before, after)
@@ -65,7 +73,13 @@ final class ShotDropSetupModelTests: XCTestCase {
             XCTAssertTrue(model.sourceRequiresReselection)
             XCTAssertFalse(model.canContinue)
             XCTAssertEqual(model.primaryTitle, "Select Current Screenshot Folder…")
+            XCTAssertTrue(model.canPerformPrimaryAction)
+            XCTAssertEqual(model.primaryAction, .chooseSource)
             let before = await service.calls
+            var pickerCalls = 0
+            await model.performPrimaryAction(chooseDestination: { XCTFail("Wrong picker") }, chooseSource: { pickerCalls += 1 })
+            XCTAssertEqual(pickerCalls, 1)
+            XCTAssertFalse(model.canContinue)
             model.confirmCurrentSource(true)
             await model.continueSetup()
             let after = await service.calls
@@ -109,7 +123,9 @@ final class ShotDropSetupModelTests: XCTestCase {
         XCTAssertEqual(model.pausedResultMessage, model.pausedSetupMessage)
         XCTAssertFalse(model.canContinue)
         XCTAssertFalse(model.canRunTest)
-        model.showSetupDetails()
+        XCTAssertTrue(model.canPerformPrimaryAction)
+        XCTAssertEqual(model.primaryAction, .details)
+        await model.performPrimaryAction(chooseDestination: { XCTFail("Paused picker") }, chooseSource: { XCTFail("Paused picker") })
         XCTAssertTrue(model.isShowingSetupDetails)
         let before = await service.calls
         await model.continueSetup()
@@ -219,6 +235,12 @@ final class ShotDropSetupModelTests: XCTestCase {
         let count = await preparer.count
         XCTAssertEqual(count, 0)
         XCTAssertEqual(model.sourceIssue, .changed)
+        XCTAssertTrue(model.canPerformPrimaryAction)
+        var sourcePickerCalls = 0
+        await model.performPrimaryAction(chooseDestination: { XCTFail("Wrong picker") }, chooseSource: { sourcePickerCalls += 1 })
+        XCTAssertEqual(sourcePickerCalls, 1)
+        let afterPicker = await preparer.count
+        XCTAssertEqual(afterPicker, 0, "The recovery CTA must not prepare default storage")
         model.showSetupDetails()
         XCTAssertFalse(model.isShowingSetupDetails)
     }
