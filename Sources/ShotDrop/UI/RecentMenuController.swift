@@ -29,7 +29,7 @@ final class RecentMenuController {
     let textCopy = ScreenshotTextCopyController(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general))
 
     private(set) var rows: [RecentMenuRow] = []
-    private(set) var status = "Setup needed · Not watching"
+    private(set) var status = "Saving paused · Developer review required"
     private(set) var historyUnavailable = false
 
     init(settings: AppSettings, history: RecentHistoryStore = RecentHistoryStore(),

@@ -57,16 +57,32 @@ struct RecentMenuPanel: View {
     @ScaledMetric(relativeTo: .body) private var filenameSize: CGFloat = 12
     @ScaledMetric(relativeTo: .caption) private var detailSize: CGFloat = 11
     @State private var availableHeight: CGFloat = 560
+    @State private var measuredHeights: [String: CGFloat] = [:]
     @State private var hoveredID: UUID?
     @State private var clearRequested = false
     @State private var pendingRemoval: UUID?
     @State private var panelWindowReference = RecentPanelWindowReference()
     @FocusState private var focusedID: UUID?
 
+    private var layout: RecentMenuLayout {
+        let totalRows = rows.prefix(20).reduce(CGFloat(0)) {
+            $0 + max(rowHeight, measuredHeights[$1.id.uuidString] ?? rowHeight)
+        } + CGFloat(max(0, min(rows.count, 20) - 1))
+        return RecentMenuLayout.measure(rowCount: rows.count,
+            chromeHeight: (measuredHeights["header"] ?? 52) + 32 + (measuredHeights["footer"] ?? 92) + 2,
+            emptyHeight: measuredHeights["empty"] ?? 160, estimatedRowHeight: rowHeight,
+            measuredTotalRowHeight: totalRows, availableHeight: availableHeight)
+    }
+    private var contentAnimation: Animation? {
+        reduceMotion ? nil : .easeOut(duration: RecentMenuLayout.transitionDuration(reduceMotion: false))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-                .frame(height: 52)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 52)
+                .background(heightReader("header"))
             Divider()
             Text("Recent Screenshots")
                 .font(.headline)
@@ -74,31 +90,55 @@ struct RecentMenuPanel: View {
                 .frame(height: 32, alignment: .leading)
 
             if rows.isEmpty {
-                emptyState
+                ScrollView {
+                    emptyState
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(heightReader("empty"))
+                }
+                .frame(height: layout.bodyHeight)
+                .transition(.opacity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(rows.prefix(20)) { row in
                             rowView(row)
+                                .background(heightReader(row.id.uuidString))
                             if row.id != rows.prefix(20).last?.id { Divider().padding(.leading, 80) }
                         }
                     }
                 }
                 .accessibilityIdentifier("recent.list")
+                .frame(height: layout.bodyHeight)
+                .transition(.opacity)
             }
 
             Divider()
             footer
                 .frame(minHeight: 72)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(heightReader("footer"))
         }
-        .frame(width: 352, height: min(560, max(0, availableHeight - 32)))
+        .frame(width: 352)
+        .fixedSize(horizontal: false, vertical: true)
+        .animation(contentAnimation, value: rows.isEmpty)
+        .animation(contentAnimation, value: historyUnavailable)
+        .animation(contentAnimation, value: layout.panelHeight)
         .background(.regularMaterial)
-        .background(RecentPanelWindowReader { window in
+        .background(RecentPanelWindowReader(contentSize: CGSize(width: 352, height: layout.panelHeight)) { window in
             panelWindowReference.window = window
             availableHeight = window.screen?.visibleFrame.height
                 ?? NSScreen.main?.visibleFrame.height ?? 592
         }.frame(width: 0, height: 0))
-        .onAppear { availableHeight = NSScreen.main?.visibleFrame.height ?? 592 }
+        .onPreferenceChange(RecentPanelHeightKey.self) { heights in
+            let keys = Set(rows.prefix(20).map { $0.id.uuidString } + ["header", "footer", "empty"])
+            var next = measuredHeights.filter { keys.contains($0.key) }
+            for (key, height) in heights where keys.contains(key) && height.isFinite && height > 0 { next[key] = height }
+            if next != measuredHeights { measuredHeights = next }
+        }
+        .onAppear {
+            availableHeight = panelWindowReference.window?.screen?.visibleFrame.height
+                ?? NSScreen.main?.visibleFrame.height ?? 592
+        }
         .onAppear { onPanelVisible(true) }
         .onDisappear { onPanelVisible(false) }
         .onChange(of: textCopyStates) { old, new in
@@ -163,7 +203,7 @@ struct RecentMenuPanel: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("ShotDrop").font(.headline)
                 Text(status).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
@@ -181,7 +221,7 @@ struct RecentMenuPanel: View {
                 .font(.headline)
             Text(historyUnavailable
                 ? "ShotDrop kept the unreadable history file. Your screenshot files were not changed."
-                : "Take a screenshot with Shift–Command–3 or Shift–Command–4. Recent screenshots will appear here after setup is complete.")
+                : "Automatic copying and saving are paused in this build. Choose Finish Setup… to review what is needed. Your originals stay in place.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -190,6 +230,12 @@ struct RecentMenuPanel: View {
         .frame(maxWidth: .infinity, minHeight: 160)
         .padding(.horizontal, 24)
         .accessibilityIdentifier("recent.empty")
+    }
+
+    private func heightReader(_ key: String) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: RecentPanelHeightKey.self, value: [key: proxy.size.height])
+        }
     }
 
     private var footer: some View {
@@ -396,19 +442,49 @@ private final class RecentPanelWindowReference {
     weak var window: NSWindow?
 }
 
+private struct RecentPanelHeightKey: PreferenceKey {
+    static let defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+/// Keep the status-item window's top edge anchored when content changes size.
+/// Resizing is immediate; only content crossfades, avoiding moving controls.
+@MainActor
+enum RecentMenuWindowSizing {
+    static func apply(_ size: CGSize, to window: NSWindow) {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+        let old = window.frame
+        var target = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        guard abs(target.width - old.width) > 0.5 || abs(target.height - old.height) > 0.5 else { return }
+        target.origin = CGPoint(x: old.minX, y: old.maxY - target.height)
+        if let visible = window.screen?.visibleFrame {
+            target.origin.x = max(visible.minX, min(target.minX, visible.maxX - target.width))
+            target.origin.y = max(visible.minY, min(target.minY, visible.maxY - target.height))
+        }
+        window.setFrame(target, display: true, animate: false)
+    }
+}
+
 private struct RecentPanelWindowReader: NSViewRepresentable {
+    let contentSize: CGSize
     let onWindow: @MainActor (NSWindow) -> Void
 
     func makeNSView(context: Context) -> RecentPanelTrackingView {
         RecentPanelTrackingView(onWindow: onWindow)
     }
 
-    func updateNSView(_ nsView: RecentPanelTrackingView, context: Context) {}
+    func updateNSView(_ nsView: RecentPanelTrackingView, context: Context) {
+        nsView.requestSize(contentSize)
+    }
 }
 
 @MainActor
 private final class RecentPanelTrackingView: NSView {
     let onWindow: @MainActor (NSWindow) -> Void
+    private var requestedSize: CGSize?
+    private var resizeTask: Task<Void, Never>?
 
     init(onWindow: @escaping @MainActor (NSWindow) -> Void) {
         self.onWindow = onWindow
@@ -419,6 +495,21 @@ private final class RecentPanelTrackingView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let window { onWindow(window) }
+        if let window {
+            onWindow(window)
+            if let requestedSize { requestSize(requestedSize) }
+        } else { resizeTask?.cancel(); resizeTask = nil }
+    }
+
+    func requestSize(_ size: CGSize) {
+        requestedSize = size
+        resizeTask?.cancel()
+        // Coalesce SwiftUI measurement updates outside the current layout pass.
+        resizeTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self, let window = self.window else { return }
+            RecentMenuWindowSizing.apply(size, to: window)
+            self.resizeTask = nil
+        }
     }
 }
