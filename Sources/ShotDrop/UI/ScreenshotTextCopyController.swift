@@ -41,11 +41,15 @@ enum ScreenshotTextCopyState: Equatable, Sendable {
 final class ScreenshotTextCopyController {
     private(set) var states: [UUID: ScreenshotTextCopyState] = [:]
     private(set) var activeID: UUID?
+    private(set) var activeOperationID: UUID?
     private let recognizer: any ScreenshotTextRecognizing
     private let writer: any ScreenshotPasteboardWriting
     private var generation: UInt64 = 0
     private var task: Task<Void, Never>?
     private var feedbackTask: Task<Void, Never>?
+    private var feedbackToken = UUID()
+    private var activePublishesRowFeedback = true
+    private var activeStateChange: (@MainActor (ScreenshotTextCopyState) -> Void)?
 
     init(recognizer: any ScreenshotTextRecognizing = LocalScreenshotTextRecognizer(),
          writer: any ScreenshotPasteboardWriting) {
@@ -55,6 +59,9 @@ final class ScreenshotTextCopyController {
 
     @discardableResult
     func start(_ record: RecentHistoryRecord,
+               operationID: UUID = UUID(),
+               publishRowFeedback: Bool = true,
+               onStateChange: (@MainActor (ScreenshotTextCopyState) -> Void)? = nil,
                isCurrent: @escaping @MainActor (RecentHistoryRecord) async -> Bool) -> Bool {
         guard activeID == nil, record.saveOutcome == .success,
               let reference = record.savedReference, reference.role == .savedCopy else { return false }
@@ -62,26 +69,33 @@ final class ScreenshotTextCopyController {
         let token = generation
         let boardCount = writer.changeCount
         activeID = record.captureID
-        states = states.filter { $0.value != .copied }
-        if states.count >= RecentHistoryStore.maxRecords { states.removeAll() }
-        states[record.captureID] = .recognizing
+        activeOperationID = operationID
+        activeStateChange = onStateChange
+        activePublishesRowFeedback = publishRowFeedback
+        if publishRowFeedback {
+            feedbackTask?.cancel(); feedbackTask = nil; feedbackToken = UUID()
+            states = states.filter { $0.value != .copied }
+            if states.count >= RecentHistoryStore.maxRecords { states.removeAll() }
+            states[record.captureID] = .recognizing
+        }
         task = Task { [self] in
-            defer { activeID = nil; task = nil }
+            defer { activeID = nil; activeOperationID = nil; task = nil; activeStateChange = nil; activePublishesRowFeedback = true }
             do {
                 let text = try await recognizer.recognize(reference)
                 guard generation == token, !Task.isCancelled else { return }
                 try ScreenshotTextLimits.validateOutput(text)
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    states[record.captureID] = .noText
+                    if await canPublishFeedback(record, token: token, publishRowFeedback: publishRowFeedback, onStateChange: onStateChange, isCurrent: isCurrent) {
+                        if publishRowFeedback { states[record.captureID] = .noText }
+                        onStateChange?(.noText)
+                    }
                     return
                 }
                 try await recognizer.revalidate(reference)
-                guard await isCurrent(record), generation == token, !Task.isCancelled else {
-                    if generation == token { states[record.captureID] = .cancelled }
-                    return
-                }
+                guard await canPublishFeedback(record, token: token, publishRowFeedback: publishRowFeedback, onStateChange: onStateChange, isCurrent: isCurrent) else { return }
                 guard writer.changeCount == boardCount else { throw ScreenshotTextFailure.clipboardChanged }
-                states[record.captureID] = .copying
+                if publishRowFeedback { states[record.captureID] = .copying }
+                onStateChange?(.copying)
                 let item = writer.makeItem()
                 guard writer.setString(text, forType: .string, on: item) else { throw ScreenshotTextFailure.representationFailed }
                 // No suspension from the final order check through the pasteboard write.
@@ -90,16 +104,21 @@ final class ScreenshotTextCopyController {
                 }
                 writer.prepareForNewContents()
                 guard writer.write(item) else { throw ScreenshotTextFailure.writeFailed }
-                states[record.captureID] = .copied
-                feedbackTask?.cancel()
-                feedbackTask = Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(1.2))
-                    guard !Task.isCancelled, let self, self.generation == token,
-                          self.states[record.captureID] == .copied else { return }
-                    self.states.removeValue(forKey: record.captureID)
+                if publishRowFeedback {
+                    states[record.captureID] = .copied
+                    feedbackTask?.cancel()
+                    feedbackToken = UUID()
+                    let expiryToken = feedbackToken
+                    feedbackTask = Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(1.2))
+                        guard !Task.isCancelled, let self, self.feedbackToken == expiryToken,
+                              self.states[record.captureID] == .copied else { return }
+                        self.states.removeValue(forKey: record.captureID)
+                    }
                 }
+                onStateChange?(.copied)
             } catch {
-                guard generation == token else { return }
+                guard await canPublishFeedback(record, token: token, publishRowFeedback: publishRowFeedback, onStateChange: onStateChange, isCurrent: isCurrent) else { return }
                 let state: ScreenshotTextCopyState
                 switch error {
                 case is CancellationError: state = .cancelled
@@ -111,20 +130,62 @@ final class ScreenshotTextCopyController {
                 case ScreenshotTextFailure.writeFailed: state = .writeFailed
                 default: state = .failed
                 }
-                states[record.captureID] = state
+                if publishRowFeedback { states[record.captureID] = state }
+                onStateChange?(state)
             }
         }
+        onStateChange?(.recognizing)
         return true
+    }
+
+    /// A revision lookup may suspend. Recheck cancellation afterward before touching
+    /// row state so a removed row or cancelled job cannot be resurrected by its result.
+    private func canPublishFeedback(_ record: RecentHistoryRecord, token: UInt64,
+        publishRowFeedback: Bool,
+        onStateChange: (@MainActor (ScreenshotTextCopyState) -> Void)?,
+        isCurrent: @MainActor (RecentHistoryRecord) async -> Bool) async -> Bool {
+        guard generation == token, !Task.isCancelled else { return false }
+        let current = await isCurrent(record)
+        guard generation == token, !Task.isCancelled else { return false }
+        if !current {
+            if publishRowFeedback { states.removeValue(forKey: record.captureID) }
+            onStateChange?(.cancelled)
+        }
+        return current
     }
 
     func cancel() {
         generation &+= 1
+        if activeID == nil || activePublishesRowFeedback {
+            feedbackTask?.cancel(); feedbackTask = nil; feedbackToken = UUID()
+            states = states.filter { $0.value != .copied }
+        }
         task?.cancel()
-        if let activeID { states[activeID] = .cancelled }
+        if let activeID {
+            if activePublishesRowFeedback { states[activeID] = .cancelled }
+            activeStateChange?(.cancelled)
+        }
+    }
+
+    /// Surface-local cancellation cannot cancel a later operation, even for the same capture.
+    func cancel(operationID: UUID) {
+        guard activeOperationID == operationID else { return }
+        cancel()
+    }
+
+    func waitForIdle(operationID: UUID) async {
+        guard activeOperationID == operationID else { return }
+        let admittedTask = task
+        await admittedTask?.value
     }
 
     func retain(_ ids: Set<UUID>) {
         if let activeID, !ids.contains(activeID) { cancel() }
+        retainFeedback(ids)
+    }
+
+    /// Refreshing Recents does not own cancellation of a thumbnail's OCR operation.
+    func retainFeedback(_ ids: Set<UUID>) {
         states = states.filter { ids.contains($0.key) }
     }
 

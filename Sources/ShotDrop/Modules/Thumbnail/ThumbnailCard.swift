@@ -10,6 +10,7 @@ struct ThumbnailCard: View {
     let capture: ThumbnailCapture
     let image: NSImage
     let feedback: ThumbnailFeedback
+    let textSession: ThumbnailTextCopySession?
     let copyImageTitle: String
     let fidelity: String
     let actionsEnabled: Bool
@@ -61,7 +62,7 @@ struct ThumbnailCard: View {
                 menuFactory: makeMenu)
                 .padding(8)
 
-            if let message = feedback.status ?? (fidelity.isEmpty ? nil : fidelity) {
+            if let message = feedback.status ?? textSession?.state?.message ?? (fidelity.isEmpty ? nil : fidelity) {
                 VStack { Spacer(); Text(message).font(.caption).padding(4).background(.regularMaterial) }
                     .allowsHitTesting(false)
             }
@@ -76,6 +77,14 @@ struct ThumbnailCard: View {
                             Button("Reveal in Finder", action: onReveal)
                         } else {
                             Button("Open Recents", action: onOpenRecents)
+                        }
+                        if let textSession {
+                            if textSession.isRunning {
+                                Button("Cancel Copy Text", action: textSession.cancel)
+                            } else {
+                                Button(textSession.actionTitle) { textSession.start() }
+                                    .disabled(!textSession.canStart)
+                            }
                         }
                         Divider()
                         Button("Dismiss Thumbnail", action: onDismiss)
@@ -118,6 +127,17 @@ struct ThumbnailCard: View {
         .accessibilityAction(named: Text(copyImageTitle), onCopy)
         .accessibilityAction(named: "Copy File", onCopyFile)
         .accessibilityAction(named: "Reveal in Finder", onReveal)
+        .accessibilityActions {
+            if let textSession {
+                if textSession.isRunning {
+                    Button("Cancel Copy Text", action: textSession.cancel)
+                } else {
+                    Button(ScreenshotTextCopyState.accessibilityActionTitle(for: textSession.state,
+                        filename: capture.finalURL.lastPathComponent)) { textSession.start() }
+                        .disabled(!textSession.canStart)
+                }
+            }
+        }
         .accessibilityAction(named: "Dismiss Thumbnail", onDismiss)
     }
 
@@ -132,6 +152,13 @@ struct ThumbnailCard: View {
             add("Reveal in Finder", to: menu, action: onReveal)
         } else {
             add("Open Recents", to: menu, action: onOpenRecents)
+        }
+        if let textSession {
+            if textSession.isRunning { add("Cancel Copy Text", to: menu, action: textSession.cancel) }
+            else {
+                add(textSession.actionTitle, to: menu) { textSession.start() }
+                menu.items.last?.isEnabled = textSession.canStart
+            }
         }
         menu.addItem(.separator())
         add("Dismiss Thumbnail", to: menu, action: onDismiss)

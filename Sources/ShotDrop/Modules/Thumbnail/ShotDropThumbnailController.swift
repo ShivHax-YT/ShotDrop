@@ -14,6 +14,7 @@ final class ShotDropThumbnailController {
     private let settings: AppSettings
     private let store: PinScreenshotStore
     private let actionDriver: ActionDriver?
+    private let textSession: ThumbnailTextCopySession?
     private var pending: Request?
     private var loading = false
     private var generation = UUID()
@@ -29,14 +30,26 @@ final class ShotDropThumbnailController {
     private var isSleeping = false
     private var stopped = false
     private var screen: NSScreen?
-    private var locked: Bool { isFocused || isMenuOpen || isDragging || actionTask != nil }
+    private var locked: Bool { isFocused || isMenuOpen || isDragging || actionTask != nil || textSession?.isRunning == true }
     var onOpenRecents: (() -> Void)?
     private let dragValidation = ThumbnailDragValidation()
     private let feedback = ThumbnailFeedback()
-    var status: String? { feedback.status }
+    var status: String? { feedback.status ?? textSession?.state?.message }
 
-    init(settings: AppSettings, store: PinScreenshotStore = PinScreenshotStore(), action: ActionDriver? = nil) {
+    init(settings: AppSettings, store: PinScreenshotStore = PinScreenshotStore(), action: ActionDriver? = nil,
+         textCopy: ScreenshotTextCopyController? = nil, manualCopyIntent: (() -> Void)? = nil) {
         self.settings = settings; self.store = store; self.actionDriver = action
+        if let textCopy, let manualCopyIntent {
+            textSession = ThumbnailTextCopySession(controller: textCopy, manualCopyIntent: manualCopyIntent)
+        } else { textSession = nil }
+        textSession?.onChange = { [weak self] in
+            guard let self else { return }
+            if let state = self.textSession?.state, self.textSession?.identity == self.visible?.1.identity {
+                if state == .recognizing { self.feedback.status = nil }
+                self.panel?.contentView?.setAccessibilityHelp(state.message)
+            }
+            self.interactionChanged()
+        }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.reposition() } })
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification,
@@ -51,6 +64,7 @@ final class ShotDropThumbnailController {
         guard !stopped, settings.showShotDropThumbnail, !isSleeping, identity.reference.role == .savedCopy else { return }
         guard visible?.1.identity != identity else { return }
         pending = Request(identity: identity, copyFailed: copyFailed, screen: captureScreen ?? inferredScreen())
+        textSession?.cancel()
         startPending()
     }
 
@@ -95,6 +109,7 @@ final class ShotDropThumbnailController {
 
     func dismiss() {
         generation = UUID()
+        textSession?.bind(nil)
         idleTask?.cancel(); idleTask = nil
         actionTask?.cancel() // Keep the operation slot until its worker returns.
         if let token = visible?.0 { Task { [store] in await store.close(token) } }
@@ -131,10 +146,11 @@ final class ShotDropThumbnailController {
         isHovered = false; isFocused = false; isMenuOpen = false; isDragging = false
         let panel = self.panel ?? ThumbnailPanel(); self.panel = panel
         let identity = snapshot.identity
+        textSession?.bind(identity)
         let capture = ThumbnailCapture(id: identity.captureID,
             finalURL: URL(fileURLWithPath: identity.reference.lastKnownPath), copyFailed: copyFailed)
         panel.onEscape = { [weak self] in self?.dismiss() }
-        let card = ThumbnailCard(capture: capture, image: image, feedback: feedback,
+        let card = ThumbnailCard(capture: capture, image: image, feedback: feedback, textSession: textSession,
             copyImageTitle: snapshot.isReduced ? "Copy Preview Image" : "Copy Image",
             fidelity: snapshot.isReduced ? "Reduced preview · \(snapshot.image.width) × \(snapshot.image.height)" : "",
             actionsEnabled: actionDriver != nil,
@@ -188,6 +204,7 @@ final class ShotDropThumbnailController {
     private func perform(_ action: PinScreenshotAction, snapshot: PinScreenshotSnapshot) {
         guard visible?.1.identity == snapshot.identity, actionTask == nil, let actionDriver else { return }
         let session = generation
+        if action == .copyImage || action == .copyFile { textSession?.cancel() }
         idleTask?.cancel()
         actionTask = Task { [weak self] in
             let result = await actionDriver(snapshot, action)

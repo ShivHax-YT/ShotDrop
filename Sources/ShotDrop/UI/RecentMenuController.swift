@@ -26,7 +26,8 @@ final class RecentMenuController {
     private var visibleRows: Set<UUID> = []
     private var generation: UInt64 = 0
     private var clipboardGeneration: UInt64 = 0
-    let textCopy = ScreenshotTextCopyController(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general))
+    let textCopy: ScreenshotTextCopyController
+    private var textCopyOperation: (id: UUID, record: RecentHistoryRecord)?
 
     private(set) var rows: [RecentMenuRow] = []
     private(set) var status = "Saving paused · Developer review required"
@@ -34,7 +35,9 @@ final class RecentMenuController {
 
     init(settings: AppSettings, history: RecentHistoryStore = RecentHistoryStore(),
          previews: RecentPreviewCache = RecentPreviewCache(), rowValidator: RowValidator? = nil,
-         annotationAdmission: ((AnnotationSessionIdentity) -> Bool)? = nil) {
+         annotationAdmission: ((AnnotationSessionIdentity) -> Bool)? = nil,
+         textCopy: ScreenshotTextCopyController? = nil) {
+        self.textCopy = textCopy ?? ScreenshotTextCopyController(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general))
         self.annotationAdmission = annotationAdmission
         self.settings = settings
         self.history = history
@@ -48,7 +51,8 @@ final class RecentMenuController {
         if visible {
             Task { await reload() }
         } else {
-            textCopy.cancel()
+            cancelOwnedTextCopy()
+            textCopy.retainFeedback([])
             generation &+= 1
             visibleRows.removeAll()
             for task in rowTasks.values { task.cancel() }
@@ -79,8 +83,9 @@ final class RecentMenuController {
             historyUnavailable = false
             let updatedRecords = Dictionary(uniqueKeysWithValues: snapshot.records.map { ($0.captureID, $0) })
             pinFeedback = pinFeedback.filter { records[$0.key] == updatedRecords[$0.key] && updatedRecords[$0.key] != nil }
+            textCopy.retainFeedback(Set(updatedRecords.keys.filter { records[$0] == updatedRecords[$0] }))
             records = updatedRecords
-            textCopy.retain(Set(records.keys))
+            retainTextCopyFeedback()
             annotationFeedback = annotationFeedback.filter { records[$0.key] != nil }
             rows = snapshot.records.map(Self.makeRow)
             for id in visibleRows { checkRow(id) }
@@ -92,13 +97,28 @@ final class RecentMenuController {
             rowValidationTokens.removeAll()
             records.removeAll()
             pinFeedback.removeAll()
-            textCopy.retain([])
+            retainTextCopyFeedback()
             rows = []
         }
     }
 
+    private func cancelOwnedTextCopy() {
+        if let operation = textCopyOperation { textCopy.cancel(operationID: operation.id) }
+        textCopyOperation = nil
+    }
+
+    private func retainTextCopyFeedback() {
+        var currentIDs = Set(records.keys)
+        if let operation = textCopyOperation, records[operation.record.captureID] != operation.record {
+            currentIDs.remove(operation.record.captureID)
+            cancelOwnedTextCopy()
+        }
+        textCopy.retainFeedback(currentIDs)
+    }
+
     func clearHistory() {
-        textCopy.cancel()
+        cancelOwnedTextCopy()
+        textCopy.retainFeedback([])
         Task {
             do {
                 try await history.clear()
@@ -162,19 +182,23 @@ final class RecentMenuController {
             return
         }
         if action == .cancelCopyText {
-            if textCopy.activeID == id { textCopy.cancel() }
+            if textCopyOperation?.record.captureID == id { cancelOwnedTextCopy() }
             return
         }
         if action == .copyText {
             guard rows.first(where: { $0.id == id })?.availability == .saved else { return }
             let requestGeneration = generation
-            if textCopy.start(record, isCurrent: { [weak self] expected in
+            let operationID = UUID()
+            if textCopy.start(record, operationID: operationID, isCurrent: { [weak self] expected in
                 guard let self, self.generation == requestGeneration,
                       self.records[id] == expected,
                       let snapshot = try? await self.history.snapshot() else { return false }
                 return self.generation == requestGeneration && self.records[id] == expected
                     && snapshot.records.first(where: { $0.captureID == id }) == expected
-            }) { clipboardGeneration &+= 1 }
+            }) {
+                textCopyOperation = (operationID, record)
+                clipboardGeneration &+= 1
+            }
             return
         }
         if action == .copyPreferred || action == .copyImage || action == .copyFile {

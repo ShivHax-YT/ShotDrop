@@ -161,6 +161,204 @@ final class ScreenshotTextCopyTests: XCTestCase {
         XCTAssertEqual(board.string(forType: .string), "First\nSecond")
     }
 
+    func testBlankAndFailureFeedbackCannotDescribeChangedRevision() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let results: [Result<String, ScreenshotTextFailure>] = [
+            .success(" \n"), .failure(.recognitionFailed), .failure(.fileUnavailable),
+            .success(String(repeating: "x", count: ScreenshotTextLimits.outputBytes + 1))
+        ]
+        for result in results {
+            let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+            let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+            var current = record
+            XCTAssertTrue(controller.start(record) { $0 == current })
+            await worker.waitForStart()
+            current.revision += 1
+            await worker.finish(result)
+            await controller.waitForIdle()
+            XCTAssertNil(controller.states[record.captureID])
+            XCTAssertNil(controller.activeID)
+            XCTAssertTrue(writer.events.isEmpty)
+        }
+    }
+
+    func testCancellationDuringAsyncRevisionCheckRetainsSlotAndCannotRestoreFeedback() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let results: [Result<String, ScreenshotTextFailure>] = [
+            .success(""), .failure(.recognitionFailed), .success("Recognized text")
+        ]
+        for result in results {
+            for removeRow in [false, true] {
+                let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+                let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+                let gate = TextRevisionGate()
+                XCTAssertTrue(controller.start(record) { _ in await gate.check() })
+                await worker.waitForStart()
+                await worker.finish(result)
+                await gate.waitUntilEntered()
+                if removeRow { controller.retain([]) } else { controller.cancel() }
+                XCTAssertEqual(controller.activeID, record.captureID)
+                XCTAssertFalse(controller.start(record) { _ in true })
+                await gate.release()
+                await controller.waitForIdle()
+                XCTAssertNil(controller.activeID)
+                if removeRow { XCTAssertNil(controller.states[record.captureID]) }
+                else { XCTAssertEqual(controller.states[record.captureID], .cancelled) }
+                XCTAssertTrue(writer.events.isEmpty)
+            }
+        }
+    }
+
+    func testCancelAfterSuccessfulCopyClearsTransientFeedbackWithoutChangingClipboard() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+        let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+        XCTAssertTrue(controller.start(record) { _ in true })
+        await worker.waitForStart()
+        await worker.finish(.success("Copied text"))
+        await controller.waitForIdle()
+        XCTAssertEqual(controller.states[record.captureID], .copied)
+        let count = writer.changeCount
+        controller.cancel() // Menu closes before the transient feedback timer expires.
+        controller.retain([record.captureID]) // Same record appears when menu reopens.
+        XCTAssertNil(controller.states[record.captureID])
+        XCTAssertEqual(writer.changeCount, count)
+        XCTAssertEqual(writer.item?.string(forType: .string), "Copied text")
+    }
+
+    func testFeedbackCallbacksStayWithAdmittedOperationThroughCancellationAndDrain() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let first = try savedRecord(fixture)
+        let second = try savedRecord(fixture)
+        let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+        let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+        var firstFeedback: [ScreenshotTextCopyState] = []
+        var rejectedFeedback: [ScreenshotTextCopyState] = []
+        var secondFeedback: [ScreenshotTextCopyState] = []
+        XCTAssertTrue(controller.start(first, onStateChange: { firstFeedback.append($0) }) { _ in true })
+        XCTAssertEqual(firstFeedback, [.recognizing], "Start synchronously returns before worker execution")
+        await worker.waitForStart()
+        controller.cancel()
+        XCTAssertFalse(controller.start(second, onStateChange: { rejectedFeedback.append($0) }) { _ in true })
+        await worker.finish(.success("Discarded"))
+        await controller.waitForIdle()
+        XCTAssertEqual(firstFeedback, [.recognizing, .cancelled])
+        XCTAssertTrue(rejectedFeedback.isEmpty)
+        XCTAssertTrue(controller.start(second, onStateChange: { secondFeedback.append($0) }) { _ in true })
+        await worker.waitForStart()
+        await worker.finish(.success("Second operation"))
+        await controller.waitForIdle()
+        XCTAssertEqual(secondFeedback, [.recognizing, .copying, .copied])
+        controller.cancel() // Completed callbacks must already be released.
+        XCTAssertEqual(firstFeedback, [.recognizing, .cancelled])
+        XCTAssertEqual(secondFeedback, [.recognizing, .copying, .copied])
+        XCTAssertEqual(writer.item?.string(forType: .string), "Second operation")
+    }
+
+    func testStaleRevisionCancelsOperationCallbackWithoutRestoringRowState() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let results: [Result<String, ScreenshotTextFailure>] = [.success(""), .failure(.recognitionFailed)]
+        for result in results {
+            let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+            let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+            var feedback: [ScreenshotTextCopyState] = []
+            XCTAssertTrue(controller.start(record, onStateChange: { feedback.append($0) }) { _ in false })
+            await worker.waitForStart()
+            await worker.finish(result)
+            await controller.waitForIdle()
+            XCTAssertEqual(feedback, [.recognizing, .cancelled])
+            XCTAssertNil(controller.states[record.captureID])
+            XCTAssertTrue(writer.events.isEmpty)
+        }
+    }
+
+    func testFinishedOperationTokenCannotCancelOrWaitForNewWorkOnSameCapture() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+        let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+        let first = UUID(), second = UUID()
+        XCTAssertTrue(controller.start(record, operationID: first) { _ in true })
+        await worker.waitForStart()
+        await worker.finish(.success("First"))
+        await controller.waitForIdle(operationID: first)
+        XCTAssertNil(controller.activeOperationID)
+        XCTAssertTrue(controller.start(record, operationID: second) { _ in true })
+        await worker.waitForStart()
+        controller.cancel(operationID: first)
+        await controller.waitForIdle(operationID: first) // Must return while second worker is still held.
+        XCTAssertEqual(controller.activeOperationID, second)
+        XCTAssertEqual(controller.states[record.captureID], .recognizing)
+        XCTAssertFalse(controller.start(record) { _ in true })
+        await worker.finish(.success("Second"))
+        await controller.waitForIdle(operationID: second)
+        XCTAssertEqual(controller.states[record.captureID], .copied)
+        XCTAssertEqual(writer.item?.string(forType: .string), "Second")
+    }
+
+    func testThumbnailFeedbackNeverChangesExistingRowStateForSameCapture() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        for scenario in 0..<5 {
+            let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+            let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+            XCTAssertTrue(controller.start(record) { _ in true })
+            await worker.waitForStart(); await worker.finish(.success("")); await controller.waitForIdle()
+            XCTAssertEqual(controller.states[record.captureID], .noText)
+            var thumbnailRecord = record
+            thumbnailRecord.revision += 1
+            let operation = UUID()
+            var feedback: [ScreenshotTextCopyState] = []
+            XCTAssertTrue(controller.start(thumbnailRecord, operationID: operation, publishRowFeedback: false,
+                onStateChange: { feedback.append($0) }) { _ in scenario != 3 })
+            XCTAssertEqual(controller.states[record.captureID], .noText)
+            await worker.waitForStart()
+            if scenario == 4 { controller.cancel(operationID: operation) }
+            switch scenario {
+            case 0: await worker.finish(.success("Thumbnail text"))
+            case 1: await worker.finish(.success(""))
+            case 2: await worker.finish(.failure(.recognitionFailed))
+            default: await worker.finish(.success("Stale or cancelled"))
+            }
+            await controller.waitForIdle(operationID: operation)
+            XCTAssertEqual(controller.states[record.captureID], .noText)
+            let terminal: ScreenshotTextCopyState = switch scenario {
+            case 0: .copied
+            case 1: .noText
+            case 2: .failed
+            default: .cancelled
+            }
+            XCTAssertEqual(feedback.last, terminal)
+        }
+    }
+
+    func testPruningRowFeedbackDoesNotCancelThumbnailOperationOrRestoreRowOnCompletion() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let record = try savedRecord(fixture)
+        let worker = ControlledTextRecognizer(); let writer = TextTestWriter()
+        let controller = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+        XCTAssertTrue(controller.start(record) { _ in true })
+        await worker.waitForStart(); await worker.finish(.success("")); await controller.waitForIdle()
+        let operation = UUID()
+        var feedback: [ScreenshotTextCopyState] = []
+        XCTAssertTrue(controller.start(record, operationID: operation, publishRowFeedback: false,
+            onStateChange: { feedback.append($0) }) { _ in true })
+        await worker.waitForStart()
+        controller.retainFeedback([])
+        XCTAssertTrue(controller.states.isEmpty)
+        XCTAssertEqual(controller.activeOperationID, operation)
+        XCTAssertEqual(feedback, [.recognizing])
+        await worker.finish(.success("Thumbnail only"))
+        await controller.waitForIdle(operationID: operation)
+        XCTAssertTrue(controller.states.isEmpty)
+        XCTAssertEqual(feedback, [.recognizing, .copying, .copied])
+        XCTAssertEqual(writer.item?.string(forType: .string), "Thumbnail only")
+    }
+
     private func savedRecord(_ fixture: ClipboardTestFixture) throws -> RecentHistoryRecord {
         RecentHistoryRecord(captureID: UUID(), pipelineSequence: 1, detectionDate: Date(), displayName: "fixture",
             sourceReference: nil,
@@ -210,4 +408,19 @@ private final class TextTestWriter: ScreenshotPasteboardWriting {
         if failWrite { return false }
         self.item = item; return true
     }
+}
+
+private actor TextRevisionGate {
+    private var entered = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var held: CheckedContinuation<Bool, Never>?
+    func check() async -> Bool {
+        entered = true
+        entryWaiters.forEach { $0.resume() }; entryWaiters.removeAll()
+        return await withCheckedContinuation { held = $0 }
+    }
+    func waitUntilEntered() async {
+        if !entered { await withCheckedContinuation { entryWaiters.append($0) } }
+    }
+    func release() { held?.resume(returning: true); held = nil }
 }
