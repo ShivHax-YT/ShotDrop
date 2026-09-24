@@ -37,10 +37,10 @@ final class ShotDropThumbnailController {
     var status: String? { feedback.status ?? textSession?.state?.message }
 
     init(settings: AppSettings, store: PinScreenshotStore = PinScreenshotStore(), action: ActionDriver? = nil,
-         textCopy: ScreenshotTextCopyController? = nil, manualCopyIntent: (() -> Void)? = nil) {
+         textCopy: ScreenshotTextCopyController? = nil, history: RecentHistoryStore? = nil, manualCopyIntent: (() -> Void)? = nil) {
         self.settings = settings; self.store = store; self.actionDriver = action
-        if let textCopy, let manualCopyIntent {
-            textSession = ThumbnailTextCopySession(controller: textCopy, manualCopyIntent: manualCopyIntent)
+        if let textCopy, let history, let manualCopyIntent {
+            textSession = ThumbnailTextCopySession(controller: textCopy, history: history, manualCopyIntent: manualCopyIntent)
         } else { textSession = nil }
         textSession?.onChange = { [weak self] in
             guard let self else { return }

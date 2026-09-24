@@ -7,10 +7,11 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testExplicitStartUsesSavedReferenceAndSharedAdmissionOnly() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let identity = try identity(fixture)
+        let history = try await history(fixture, identity: identity)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
         var intents = 0
-        let session = ThumbnailTextCopySession(controller: shared) { intents += 1 }
+        let session = ThumbnailTextCopySession(controller: shared, history: history) { intents += 1 }
         session.bind(identity)
         XCTAssertNil(shared.activeID)
         XCTAssertNil(session.state)
@@ -34,10 +35,11 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testReplacementCancelsAndDrainsWithoutLateFeedbackOrCopy() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let first = try identity(fixture)
+        let history = try await history(fixture, identity: first)
         let replacement = PinScreenshotIdentity(captureID: first.captureID, revision: first.revision + 1, reference: first.reference)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-        let session = ThumbnailTextCopySession(controller: shared, manualCopyIntent: {})
+        let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
         session.bind(first); XCTAssertTrue(session.start())
         await worker.waitForStart()
         session.bind(replacement)
@@ -51,6 +53,7 @@ final class ThumbnailTextCopyTests: XCTestCase {
         XCTAssertNil(session.state)
         XCTAssertNil(shared.activeID)
         XCTAssertEqual(writer.writes, 0)
+        _ = try await history.update(captureID: first.captureID, expectedRevision: first.revision, change: .init(copyOutcome: .success))
         XCTAssertTrue(session.start())
         await worker.waitForStart(); await worker.finish("")
         await session.waitForIdle()
@@ -60,9 +63,10 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testDismissalRetainsWorkerAdmissionAndRejectsFeedback() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let identity = try identity(fixture)
+        let history = try await history(fixture, identity: identity)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-        let session = ThumbnailTextCopySession(controller: shared, manualCopyIntent: {})
+        let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
         session.bind(identity); XCTAssertTrue(session.start())
         await worker.waitForStart()
         session.bind(nil)
@@ -79,12 +83,13 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testSharedBusyDoesNotInvalidateIntentOrCancelOtherSurface() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let identity = try identity(fixture)
+        let history = try await history(fixture, identity: identity)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
         XCTAssertTrue(shared.start(record(identity)) { _ in true })
         await worker.waitForStart()
         var intents = 0
-        let session = ThumbnailTextCopySession(controller: shared) { intents += 1 }
+        let session = ThumbnailTextCopySession(controller: shared, history: history) { intents += 1 }
         session.bind(identity)
         XCTAssertFalse(session.start())
         session.bind(nil)
@@ -98,9 +103,10 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testSourceRoleNeverAdmitsAndExplicitCancelHasRetryLabel() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let saved = try identity(fixture)
+        let history = try await history(fixture, identity: saved)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-        let session = ThumbnailTextCopySession(controller: shared, manualCopyIntent: {})
+        let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
         let source = try RecentFileReference.capture(at: textFixtureURL(fixture.source), role: .source)
         session.bind(PinScreenshotIdentity(captureID: UUID(), revision: 1, reference: source))
         XCTAssertFalse(session.start())
@@ -118,9 +124,10 @@ final class ThumbnailTextCopyTests: XCTestCase {
     func testFinishedThumbnailCancellationCannotCancelNewSharedOperationForSameCapture() async throws {
         let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
         let identity = try identity(fixture)
+        let history = try await history(fixture, identity: identity)
         let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
         let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-        let session = ThumbnailTextCopySession(controller: shared, manualCopyIntent: {})
+        let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
         session.bind(identity); XCTAssertTrue(session.start())
         await worker.waitForStart(); await worker.finish("First thumbnail text")
         await shared.waitForIdle()
@@ -142,9 +149,10 @@ final class ThumbnailTextCopyTests: XCTestCase {
         for corruptHistory in [false, true] {
             let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
             let identity = try identity(fixture)
+            let history = try await history(fixture, identity: identity)
             let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
             let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
-            let session = ThumbnailTextCopySession(controller: shared, manualCopyIntent: {})
+            let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
             let suite = "ShotDrop-thumbnail-ownership-\(UUID())"
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
@@ -200,6 +208,68 @@ final class ThumbnailTextCopyTests: XCTestCase {
             XCTAssertNil(shared.activeID)
             XCTAssertNil(shared.states[identity.captureID], "Old revision feedback must not label the new row")
         }
+    }
+
+    func testAuthoritativeHistoryRevisionChangeWithoutRebindingPreventsPublication() async throws {
+        let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+        let identity = try identity(fixture)
+        let history = try await history(fixture, identity: identity)
+        let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
+        let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+        let session = ThumbnailTextCopySession(controller: shared, history: history, manualCopyIntent: {})
+        session.bind(identity); XCTAssertTrue(session.start())
+        await worker.waitForStart()
+        _ = try await history.update(captureID: identity.captureID, expectedRevision: identity.revision,
+            change: .init(copyOutcome: .success))
+        await worker.finish("Text from stale history revision")
+        await session.waitForIdle()
+        XCTAssertEqual(session.identity, identity, "No local rebinding occurred")
+        XCTAssertEqual(writer.writes, 0)
+        XCTAssertNotEqual(session.state, .copied)
+        XCTAssertTrue(shared.states.isEmpty)
+    }
+
+    func testHistoryRemovalCaptureReferenceMismatchAndReadFailureFailClosed() async throws {
+        for kind in ["removed", "capture", "reference", "failure", "unreadable"] {
+            let fixture = try ClipboardTestFixture(); defer { fixture.cleanUp() }
+            let identity = try identity(fixture)
+            var authoritative = try await history(fixture, identity: identity)
+            var bound = identity
+            if kind == "capture" {
+                bound = .init(captureID: UUID(), revision: identity.revision, reference: identity.reference)
+            } else if kind == "reference" {
+                let alternate = try RecentFileReference.capture(at: textFixtureURL(fixture.source), role: .savedCopy)
+                bound = .init(captureID: identity.captureID, revision: identity.revision, reference: alternate)
+            } else if kind == "unreadable" {
+                let url = fixture.root.appendingPathComponent("unreadable-history.json")
+                try Data("malformed history".utf8).write(to: url)
+                authoritative = RecentHistoryStore(fileURL: url)
+            }
+            let worker = ThumbnailTextWorker(); let writer = ThumbnailTextWriter()
+            let shared = ScreenshotTextCopyController(recognizer: worker, writer: writer)
+            let session = ThumbnailTextCopySession(controller: shared, history: authoritative, manualCopyIntent: {})
+            session.bind(bound); XCTAssertTrue(session.start())
+            await worker.waitForStart()
+            if kind == "removed" { try await authoritative.remove(captureID: identity.captureID) }
+            if kind == "failure" {
+                _ = try await authoritative.update(captureID: identity.captureID, expectedRevision: identity.revision,
+                    change: .init(saveOutcome: .failure))
+            }
+            await worker.finish("Must not publish")
+            await session.waitForIdle()
+            XCTAssertEqual(writer.writes, 0, kind)
+            XCTAssertNotEqual(session.state, .copied, kind)
+            XCTAssertTrue(shared.states.isEmpty, kind)
+        }
+    }
+
+    private func history(_ fixture: ClipboardTestFixture, identity: PinScreenshotIdentity) async throws -> RecentHistoryStore {
+        let history = RecentHistoryStore(fileURL: fixture.root.appendingPathComponent("thumbnail-history-\(UUID().uuidString).json"))
+        _ = try await history.admit(captureID: identity.captureID, pipelineSequence: 1, detectionDate: Date(), displayName: "Saved screenshot")
+        _ = try await history.update(captureID: identity.captureID, expectedRevision: 0,
+            change: .init(saveOutcome: .success, savedReference: identity.reference))
+        _ = try await history.update(captureID: identity.captureID, expectedRevision: 1, change: .init(copyOutcome: .pending))
+        return history
     }
 
     private func identity(_ fixture: ClipboardTestFixture) throws -> PinScreenshotIdentity {

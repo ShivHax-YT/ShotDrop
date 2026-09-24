@@ -6,6 +6,7 @@ import Observation
 @MainActor @Observable
 final class ThumbnailTextCopySession {
     private let controller: ScreenshotTextCopyController
+    private let history: RecentHistoryStore
     private let manualCopyIntent: () -> Void
     private(set) var identity: PinScreenshotIdentity?
     private(set) var state: ScreenshotTextCopyState?
@@ -14,8 +15,9 @@ final class ThumbnailTextCopySession {
     private var drain: Task<Void, Never>?
     @ObservationIgnored var onChange: (() -> Void)?
 
-    init(controller: ScreenshotTextCopyController, manualCopyIntent: @escaping () -> Void) {
+    init(controller: ScreenshotTextCopyController, history: RecentHistoryStore, manualCopyIntent: @escaping () -> Void) {
         self.controller = controller
+        self.history = history
         self.manualCopyIntent = manualCopyIntent
     }
     var actionTitle: String { ScreenshotTextCopyState.actionTitle(for: state) }
@@ -42,10 +44,15 @@ final class ThumbnailTextCopySession {
             self.state = state
             self.onChange?()
         }, isCurrent: { [weak self] candidate in
-            guard let self else { return false }
+            guard let self, self.operation == token, self.identity == identity,
+                  candidate.captureID == identity.captureID, candidate.revision == identity.revision,
+                  candidate.savedReference == identity.reference,
+                  let snapshot = try? await self.history.snapshot(),
+                  let current = snapshot.records.first(where: { $0.captureID == identity.captureID }) else { return false }
+            // History lookup suspends. Dismissal/replacement during that read must still fence publication.
             return self.operation == token && self.identity == identity
-                && candidate.captureID == identity.captureID && candidate.revision == identity.revision
-                && candidate.savedReference == identity.reference
+                && current.revision == identity.revision && current.savedReference == identity.reference
+                && current.saveOutcome == .success
         })
         guard accepted else { operation = nil; isRunning = false; return false }
         manualCopyIntent() // Integration must not cancel the OCR operation just admitted above.
