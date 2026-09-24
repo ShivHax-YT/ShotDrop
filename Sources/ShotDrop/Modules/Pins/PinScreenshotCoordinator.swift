@@ -209,6 +209,21 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
         }
     }
     typealias ActionDriver = @MainActor (PinScreenshotSnapshot, PinScreenshotAction) async -> PinScreenshotActionResult
+    typealias Presentation = @MainActor (NSPanel, PinPanelPresentation.Intent) -> Void
+    typealias AdmissionDriver = @MainActor (PinScreenshotIdentity) async throws -> PinScreenshotStore.Admission
+    private struct AdmissionLifetime {
+        let identity: PinScreenshotIdentity
+        var requests = 0
+        var token: UUID?
+        var pendingExistingToken: UUID?
+    }
+    private var admissionLifetimes: [UUID: AdmissionLifetime] = [:]
+    private let admission: AdmissionDriver
+    var pendingExplicitShowCount: Int {
+        pendingExplicitShows.count + admissionLifetimes.values.filter { $0.pendingExistingToken != nil }.count
+    }
+    private let presentation: Presentation
+    private var pendingExplicitShows: Set<UUID> = []
     private let actionDriver: ActionDriver?
     private let store: PinScreenshotStore
     private var actionTasks: [UUID: Task<Void, Never>] = [:]
@@ -228,7 +243,11 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
     private(set) var status: String? { didSet { onChange?() } }
     var items: [Item] { names.map { Item(id: $0.key, filename: $0.value) }.sorted { $0.filename < $1.filename } }
 
-    init(store: PinScreenshotStore = PinScreenshotStore(), action: ActionDriver? = nil) {
+    init(store: PinScreenshotStore = PinScreenshotStore(), action: ActionDriver? = nil,
+         admission: AdmissionDriver? = nil,
+         presentation: @escaping Presentation = { panel, intent in PinPanelPresentation.present(panel, intent: intent) }) {
+        self.admission = admission ?? { try await store.admit($0) }
+        self.presentation = presentation
         self.actionDriver = action
         self.store = store
         workspaceNotifications = NSWorkspace.shared.notificationCenter
@@ -246,20 +265,42 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
     }
 
     func pin(_ identity: PinScreenshotIdentity, filename: String) async {
+        let lifetime: UUID
+        if let existing = admissionLifetimes.first(where: { $0.value.identity == identity })?.key {
+            lifetime = existing
+        } else {
+            guard admissionLifetimes.count < PinScreenshotStore.maximumSessions else {
+                onFeedback?(identity, .capacity); onCapacityReached?(); return
+            }
+            lifetime = UUID()
+            admissionLifetimes[lifetime] = AdmissionLifetime(identity: identity)
+        }
+        admissionLifetimes[lifetime]?.requests += 1
+        defer { finishAdmission(lifetime) }
         let generation = closeAllGeneration
         onFeedback?(identity, .loading)
         do {
-            let admission = try await store.admit(identity)
-            guard generation == closeAllGeneration else {
-                if case .opened(let token) = admission { await store.close(token) }
-                onFeedback?(identity, .closed)
-                return
+            let admission = try await self.admission(identity)
+            guard generation == closeAllGeneration, admissionLifetimes[lifetime] != nil else {
+                if case .opened(let token) = admission {
+                    pendingExplicitShows.remove(token)
+                    await store.close(token)
+                }
+                return // Retired request tickets cannot restore feedback or pending intent.
             }
             switch admission {
             case .existing(let token):
-                show(token)
-                onFeedback?(identity, panels[token] == nil ? .loading : .shown)
-            case .closing:
+                if admissionLifetimes[lifetime]?.token == token, names[token] != nil {
+                    show(token)
+                    onFeedback?(identity, panels[token] == nil ? .loading : .shown)
+                } else if (admissionLifetimes[lifetime]?.requests ?? 0) > 1 {
+                    // Another admission may own .opened but has not resumed locally.
+                    admissionLifetimes[lifetime]?.pendingExistingToken = token
+                } else {
+                    onFeedback?(identity, .closing)
+                }
+            case .closing(let token):
+                pendingExplicitShows.remove(token)
                 status = Feedback.closing.message
                 onFeedback?(identity, .closing)
             case .full:
@@ -267,6 +308,9 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
                 onFeedback?(identity, .capacity)
                 onCapacityReached?()
             case .opened(let token):
+                if admissionLifetimes[lifetime]?.pendingExistingToken == token { pendingExplicitShows.insert(token) }
+                admissionLifetimes[lifetime]?.pendingExistingToken = nil
+                admissionLifetimes[lifetime]?.token = token
                 identities[token] = identity
                 names[token] = filename
                 let pointer = NSEvent.mouseLocation
@@ -279,6 +323,8 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
                     } catch {
                         guard let self else { return }
                         self.loads[token] = nil
+                        self.pendingExplicitShows.remove(token)
+                        self.admissionLifetimes.removeValue(forKey: lifetime)
                         if self.names.removeValue(forKey: token) != nil {
                             self.identities.removeValue(forKey: token)
                             let message = "Screenshot unavailable. Open Recents to check the saved file."
@@ -290,22 +336,44 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
                 }
             }
         } catch {
-            guard generation == closeAllGeneration else { onFeedback?(identity, .closed); return }
+            guard generation == closeAllGeneration, admissionLifetimes[lifetime] != nil else { return }
             let message = "Screenshot unavailable. Open Recents to check the saved file."
             status = message
             onFeedback?(identity, .failed(message))
         }
     }
 
+    private func finishAdmission(_ lifetime: UUID) {
+        guard var value = admissionLifetimes[lifetime] else { return }
+        value.requests -= 1
+        if value.requests == 0, value.token == nil {
+            admissionLifetimes.removeValue(forKey: lifetime)
+            if value.pendingExistingToken != nil { onFeedback?(value.identity, .closing) }
+        } else { admissionLifetimes[lifetime] = value }
+    }
+    private func invalidateAdmissions(for token: UUID) {
+        for key in admissionLifetimes.filter({ $0.value.token == token }).keys {
+            admissionLifetimes.removeValue(forKey: key)
+        }
+    }
+
     func managePins() { onManagePins?() }
     func openRecents() { onOpenRecents?() }
     func show(_ token: UUID) {
-        guard let panel = panels[token] else { return }
+        guard let panel = panels[token] else {
+            if names[token] != nil { pendingExplicitShows.insert(token) }
+            return
+        }
+        pendingExplicitShows.remove(token)
         refreshGeometry(panel)
-        PinPanelPresentation.present(panel, intent: .explicitShow)
+        presentation(panel, .explicitShow)
     }
     func close(_ token: UUID) {
-        if let identity = identities.removeValue(forKey: token) { onFeedback?(identity, .closed) }
+        pendingExplicitShows.remove(token)
+        if let identity = identities.removeValue(forKey: token) {
+            invalidateAdmissions(for: token)
+            onFeedback?(identity, .closed)
+        }
         names.removeValue(forKey: token)
         actionTasks.removeValue(forKey: token)?.cancel()
         actionGeneration.removeValue(forKey: token)
@@ -319,6 +387,8 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
     }
     func closeAll() {
         closeAllGeneration &+= 1
+        admissionLifetimes.removeAll()
+        pendingExplicitShows.removeAll()
         for token in Array(names.keys) { close(token) }
     }
     func windowWillClose(_ notification: Notification) {
@@ -379,7 +449,8 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
         panels[token] = panel
         status = nil
         onFeedback?(snapshot.identity, .shown)
-        PinPanelPresentation.present(panel, intent: .passiveLoad)
+        let intent: PinPanelPresentation.Intent = pendingExplicitShows.remove(token) != nil ? .explicitShow : .passiveLoad
+        presentation(panel, intent)
     }
 
     private func perform(_ action: PinScreenshotAction, snapshot: PinScreenshotSnapshot, token: UUID) {
