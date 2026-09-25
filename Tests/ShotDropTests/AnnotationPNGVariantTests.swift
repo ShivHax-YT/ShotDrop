@@ -46,7 +46,7 @@ final class AnnotationPNGVariantTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual($0 as? AnnotationFailure, .invalidImage)
             }
         }
-        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+        XCTAssertTrue(AnnotationExportAvailability.productionEnabled)
     }
 
     private func assertNormalization(_ png: Data, width: Int, height: Int, expected: [UInt8]) async throws {
@@ -81,7 +81,7 @@ final class AnnotationPNGVariantTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(Data(SHA256.hash(data: after)), hash)
         XCTAssertEqual(try stagingTestAttributeHashes(at: url), initialAttributes)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["source.png"])
-        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+        XCTAssertTrue(AnnotationExportAvailability.productionEnabled)
     }
 
     private func assertPixels(_ actual: Data, _ expected: [UInt8], file: StaticString = #filePath, line: UInt = #line) {

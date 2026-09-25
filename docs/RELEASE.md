@@ -1,0 +1,20 @@
+# Distribution checklist
+
+Local development builds are separate from a notarized public release.
+
+- Build Release with `xcodebuild -project ShotDrop.xcodeproj -scheme ShotDrop -configuration Release -derivedDataPath build-release build`.
+- Use a Developer ID Application identity and hardened runtime for distribution.
+  Development signing is for local use, not public distribution.
+- Verify with `codesign --verify --deep --strict --verbose=2 ShotDrop.app`.
+- Package with `ditto -c -k --keepParent ShotDrop.app ShotDrop.zip`.
+- With the owner's configured Keychain notary profile, submit the archive using
+  `xcrun notarytool submit ShotDrop.zip --keychain-profile PROFILE --wait`.
+- Staple the accepted ticket with `xcrun stapler staple ShotDrop.app`, then validate
+  the ticket and Gatekeeper assessment on a downloaded copy on another Mac.
+- Before publishing, exercise fresh setup, folder denial/recovery, launch at login,
+  native capture commands, restart, sleep/wake, clipboard consumers and VoiceOver
+  on macOS 14 and the current macOS release. Check at least one multiple-display
+  setup and pinned-window behavior in Spaces/fullscreen.
+
+Notarization and publication require the owner's distribution identity/profile.
+Nothing in this task uploads screenshots, publishes a release, or stores credentials.

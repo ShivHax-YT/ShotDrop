@@ -29,8 +29,9 @@ final class RecentMenuController {
     let textCopy: ScreenshotTextCopyController
     private var textCopyOperation: (id: UUID, record: RecentHistoryRecord)?
 
+    var onRetrySave: ((RecentHistoryRecord) async -> Void)?
     private(set) var rows: [RecentMenuRow] = []
-    private(set) var status = "Saving paused · Developer review required"
+    var status = "Finish setup to start copying and saving"
     private(set) var historyUnavailable = false
 
     init(settings: AppSettings, history: RecentHistoryStore = RecentHistoryStore(),
@@ -40,11 +41,36 @@ final class RecentMenuController {
         self.textCopy = textCopy ?? ScreenshotTextCopyController(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general))
         self.annotationAdmission = annotationAdmission
         self.settings = settings
+        annotationEditor.exportCopy = { [settings, history] source, state, copy in
+            let renderer = AnnotationRenderer()
+            let png = try await renderer.png(source: source, state: state)
+            let exporter = AnnotationExportService(fileSystem: DirectScreenshotFileSystem())
+            let receipt = try await exporter.export(png: png, source: source.reference,
+                destination: URL(fileURLWithPath: settings.destinationPath),
+                proposedStem: URL(fileURLWithPath: source.reference.lastKnownPath).deletingPathExtension().lastPathComponent + "-annotated")
+            let reference = try await Task.detached {
+                try RecentFileReference.capture(at: receipt.destinationURL, role: .savedCopy)
+            }.value
+            let record = try await history.admit(captureID: UUID(), pipelineSequence: UInt64.max,
+                detectionDate: Date(), displayName: receipt.destinationURL.lastPathComponent)
+            _ = try await history.update(captureID: record.captureID, expectedRevision: record.revision,
+                change: .init(copyOutcome: .pending, saveOutcome: .success, savedReference: reference))
+            if copy {
+                let prepared = try await ScreenshotClipboardPreparer().prepare(.init(sourceURL: receipt.destinationURL,
+                    mode: settings.copyMode, expectedIdentity: receipt.identity,
+                    survivingFileURL: receipt.destinationURL, survivingFileIdentity: receipt.identity))
+                _ = try await ScreenshotClipboardPublisher(writer: AppKitScreenshotPasteboardWriter(pasteboard: .general)).publish(prepared)
+                _ = try await history.update(captureID: record.captureID, expectedRevision: record.revision + 1,
+                    change: .init(copyOutcome: .success))
+            }
+            return receipt.destinationURL
+        }
         self.history = history
         self.previews = previews
         self.validateRow = rowValidator ?? { id, reference in
             try await previews.validateRow(captureID: id, reference: reference)
         }
+        annotationEditor.onChange = { [weak self] in Task { await self?.reload() } }
     }
 
     func panelVisible(_ visible: Bool) {
@@ -140,6 +166,7 @@ final class RecentMenuController {
 
     func perform(_ id: UUID, _ action: RecentMenuAction) {
         guard let record = records[id], rows.first(where: { $0.id == id })?.allows(action) == true else { return }
+        if action == .retrySave { Task { await onRetrySave?(record) }; return }
         if action == .pin {
             guard let reference = record.savedReference, reference.role == .savedCopy else { return }
             pinFeedback[id] = nil
@@ -250,6 +277,14 @@ final class RecentMenuController {
                     }
                 }
                 switch action {
+                case .trashSaved:
+                    do {
+                        try await trashVerifiedScreenshot(reference)
+                        try await history.remove(captureID: id)
+                        await previews.invalidate(captureID: id)
+                        await reload()
+                        status = "Saved copy moved to Trash · Original retained"
+                    } catch { status = "Could not move the saved copy to Trash: " + error.localizedDescription }
                 case .open:
                     if !NSWorkspace.shared.open(file.url) { status = "Could not open screenshot" }
                 case .revealSaved, .revealOriginal:
@@ -259,7 +294,7 @@ final class RecentMenuController {
                 case .copyPreferred, .copyImage, .copyFile:
                     await copy(file, id: id, mode: copyMode(for: action), generation: requestGeneration,
                                clipboardToken: clipboardToken)
-                case .copyText, .cancelCopyText, .annotate, .pin, .retryFileCheck, .removeFromRecents: break
+                case .retrySave, .copyText, .cancelCopyText, .annotate, .pin, .retryFileCheck, .removeFromRecents: break
                 }
             }
         }
@@ -301,6 +336,8 @@ final class RecentMenuController {
         pinManager.onCloseAll = { [weak self] in self?.closeAllPins() }
         pinManager.update(pinItems); pinManager.show()
     }
+
+    func prepareToQuit() -> Bool { annotationEditor.prepareToQuit() }
 
     func currentAnnotationRequest() -> Task<Void, Never>? { annotationTask }
 
@@ -456,4 +493,12 @@ final class RecentMenuController {
 @concurrent
 private func resolveRecent(_ reference: RecentFileReference) async -> RecentFileResolution {
     RecentFileResolver().resolve(reference)
+}
+
+@concurrent
+private func trashVerifiedScreenshot(_ reference: RecentFileReference) async throws {
+    guard reference.role == .savedCopy, case .available(let file) = RecentFileResolver().resolve(reference) else {
+        throw CocoaError(.fileReadNoSuchFile)
+    }
+    try FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
 }

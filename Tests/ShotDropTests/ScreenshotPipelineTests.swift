@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class ScreenshotPipelineTests: XCTestCase {
+    func testDeduplicationCapacityDoesNotStopAcceptingNewScreenshots() async throws {
+        let fixture = try ClipboardTestFixture()
+        defer { fixture.cleanUp() }
+        let h = try PipelineHarness(fixture)
+        let expectations = (1...3).map { expectation(description: "Capture \($0) completed") }
+        let pipeline = h.make(deduplicationLimit: 2, failSave: true, completion: { outcome in
+            expectations[Int(outcome.observationSequence) - 1].fulfill()
+        })
+        try await pipeline.start(sourceAccessExplained: true)
+        for index in 1...3 {
+            let event = DetectedScreenshot(url: fixture.source,
+                identity: .init(device: 1, inode: UInt64(index), birthNanoseconds: Int64(index)),
+                readinessLatency: .zero, candidateToReadyLatency: .zero, readinessAttempts: 2,
+                observationSequence: UInt64(index))
+            await h.detector.emit(event)
+            await fulfillment(of: [expectations[index - 1]], timeout: 3)
+        }
+        XCTAssertEqual(h.outcomes.count, 3)
+        XCTAssertTrue(pipeline.rejectedSources.isEmpty)
+        await pipeline.stop()
+    }
+
     func testExplanationAndDeniedAccessNeverStartDetector() async throws {
         let fixture = try ClipboardTestFixture()
         defer { fixture.cleanUp() }
@@ -318,12 +340,13 @@ private final class PipelineHarness {
     }
     func make(authorize: @escaping @Sendable () async throws -> Void = {},
               prepare: @escaping ScreenshotPipeline.Prepare = { try await ScreenshotClipboardPreparer().prepare($0) },
+              deduplicationLimit: Int = ScreenshotPipeline.maximumAcceptedPerSession,
               failSave: Bool = false, fallback: Bool = false,
               beforeStart: @escaping @Sendable () async -> Void = {},
               beforeStop: @escaping @Sendable () async -> Void = {},
               completion: @escaping (ScreenshotPipelineOutcome) -> Void = { _ in }) -> ScreenshotPipeline {
         let detector = detector, fixture = fixture, saves = saves, savedIdentity = savedIdentity
-        return ScreenshotPipeline(writer: writer, mode: .both, authorizeSource: authorize,
+        return ScreenshotPipeline(writer: writer, mode: .both, deduplicationLimit: deduplicationLimit, authorizeSource: authorize,
             startDetector: { await beforeStart(); await detector.start($0) }, stopDetector: { await beforeStop(); await detector.stop() },
             registerOutput: { await detector.register($0) }, request: { event in
                 .init(organization: .init(sourceURL: event.url, destinationRoot: fixture.root,

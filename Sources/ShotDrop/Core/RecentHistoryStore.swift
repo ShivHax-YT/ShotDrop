@@ -156,6 +156,7 @@ actor RecentHistoryStore {
     }
 
     private static func newerFirst(_ lhs: RecentHistoryRecord, _ rhs: RecentHistoryRecord) -> Bool {
+        if lhs.detectionDate != rhs.detectionDate { return lhs.detectionDate > rhs.detectionDate }
         if lhs.pipelineSequence != rhs.pipelineSequence { return lhs.pipelineSequence > rhs.pipelineSequence }
         return lhs.captureID.uuidString < rhs.captureID.uuidString
     }
@@ -194,10 +195,9 @@ actor RecentHistoryStore {
             try validate(record)
             guard seen.insert(record.captureID).inserted else { throw RecentHistoryStoreError.invalidRecord }
         }
-        guard envelope.records.sorted(by: Self.newerFirst) == envelope.records else {
-            throw RecentHistoryStoreError.invalidRecord
-        }
-        records = envelope.records
+        // Older builds sorted session-local sequences, which put exports and old sessions first.
+        // Migrate validated records in memory; preserve loadedBytes for write conflict detection.
+        records = envelope.records.sorted(by: Self.newerFirst)
         loadedBytes = bytes
     }
 

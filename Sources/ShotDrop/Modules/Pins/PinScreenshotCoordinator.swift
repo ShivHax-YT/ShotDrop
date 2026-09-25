@@ -85,7 +85,8 @@ private final class PinPanelContent: NSViewController {
     required init?(coder: NSCoder) { nil }
 
     override func loadView() {
-        view = NSView()
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 340))
+        preferredContentSize = NSSize(width: 360, height: 340)
         let fit = NSButton(title: "Fit", target: self, action: #selector(fitImage))
         let actual = NSButton(title: "100%", target: self, action: #selector(actualSize))
         actual.setAccessibilityLabel("Actual Size")
@@ -146,6 +147,7 @@ private final class PinPanelContent: NSViewController {
             actionStatus.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
             actionStatus.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             actionStatus.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
             scroll.topAnchor.constraint(equalTo: actionStatus.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
@@ -443,6 +445,7 @@ final class PinScreenshotCoordinator: NSObject, NSWindowDelegate {
         content.onReveal = { [weak self] in self?.perform(.reveal, snapshot: snapshot, token: token) }
         content.onOpenRecents = { [weak self] in self?.openRecents() }
         panel.contentViewController = content
+        panel.setContentSize(NSSize(width: 360, height: 340))
         panel.delegate = self
         panel.setFrame(PinPanelGeometry.placement(size: panel.frame.size, visible: screen.visibleFrame,
             occupied: panels.values.map(\.frame)), display: false)

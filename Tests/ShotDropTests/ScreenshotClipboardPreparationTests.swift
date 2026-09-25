@@ -16,13 +16,13 @@ final class ScreenshotClipboardPreparationTests: XCTestCase {
         }
     }
 
-    func testJPEGBytesWithPNGFilenameAreNotMislabeled() async throws {
+    func testJPEGBytesAreConvertedToRealPNGForClipboard() async throws {
         let fixture = try ClipboardTestFixture()
         defer { fixture.cleanUp() }
         try ClipboardTestFixture.imageData(type: .jpeg).write(to: fixture.source)
-        await assertFailure(.unsupportedImage) {
-            _ = try await ScreenshotClipboardPreparer().prepare(fixture.request(.image))
-        }
+        let converted = try await ScreenshotClipboardPreparer().prepare(fixture.request(.image))
+        XCTAssertTrue(try XCTUnwrap(converted.pngData).starts(with: [137, 80, 78, 71, 13, 10, 26, 10]))
+        XCTAssertNil(converted.fileURL)
         let file = try await ScreenshotClipboardPreparer().prepare(fixture.request(.file))
         XCTAssertNil(file.pngData)
         XCTAssertEqual(file.fileURL, fixture.saved)

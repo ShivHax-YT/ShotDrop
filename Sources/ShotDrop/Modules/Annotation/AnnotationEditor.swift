@@ -30,6 +30,9 @@ final class AnnotationEditorModel {
     @ObservationIgnored var openRecents: (() -> Void)?
     @ObservationIgnored var announceResult: ((String) -> Void)?
     private var closed = false
+    @ObservationIgnored var didSave: (() -> Void)?
+    @ObservationIgnored var exportCopy: ((AnnotationSource, AnnotationState, Bool) async throws -> URL)?
+    var canSave: Bool { exportCopy != nil && source != nil && document != nil && !busy && !rendering && !gestureActive }
     static let exportUnavailable = AnnotationExportAvailability.explanation
 
     init(identity: AnnotationSessionIdentity, renderer: AnnotationRenderer = AnnotationRenderer(), sourceLoader: (@Sendable (RecentFileReference) async throws -> AnnotationSource)? = nil, previewRenderer: (@Sendable (AnnotationSource, AnnotationState) async throws -> AnnotationRaster)? = nil) { self.identity = identity; self.renderer = renderer; self.sourceLoader = sourceLoader; self.previewRenderer = previewRenderer }
@@ -47,7 +50,7 @@ final class AnnotationEditorModel {
                 source = value
                 document = try AnnotationDocument(width: value.width, height: value.height)
                 shouldAnnouncePreviewResult = true
-                message = "Original unchanged · Preview only. Visual blur is not secure redaction."
+                message = "Original unchanged. Visual blur is not secure redaction."
             } catch {
                 message = "Screenshot unavailable. Restore the saved copy, then retry, or open Recents to check its last saved location."
                 if !closed { announceResult?(message + " Retry Image.") }
@@ -63,7 +66,26 @@ final class AnnotationEditorModel {
         if source != nil, document != nil { shouldAnnouncePreviewResult = true; refresh() } else { load() }
     }
     func chooseZoom(_ value: Double) { zoom = value; fit = false }
-    func save() { message = Self.exportUnavailable }
+    func save() { save(copyToClipboard: false) }
+    func save(copyToClipboard: Bool) {
+        guard canSave, let source, let document, let exportCopy else { message = Self.exportUnavailable; return }
+        busy = true
+        let revision = document.revision
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await exportCopy(source, document.state, copyToClipboard)
+                if !closed {
+                    try self.document?.markSaved(revision: revision)
+                    message = "Saved " + url.lastPathComponent + (copyToClipboard ? " and copied to clipboard." : ". Original unchanged.")
+                    announceResult?(message)
+                    didSave?()
+                }
+            } catch { if !closed { message = "Could not finish export: " + error.localizedDescription + " Your edits are kept." } }
+            busy = false; task = nil
+            if previewRequested { refresh() }
+        }
+    }
     func beginGesture() { gestureActive = true; gestureRevision = document?.revision }
     func endGesture() { gestureActive = false; gestureRevision = nil }
     func cancelGesture() { endGesture(); cropDraft = nil }
@@ -178,7 +200,7 @@ final class AnnotationEditorModel {
                         image = try AnnotationRenderer.image(raster: raster)
                         renderedCrop = document.state.crop; renderedRevision = revision
                         previewFailed = false
-                        message = "Original unchanged · Preview only. Visual blur is not secure redaction."
+                        message = "Original unchanged. Visual blur is not secure redaction."
                     }
                 } catch { if !closed { previewFailed = true; message = "Preview unavailable. Your edits are preserved. Retry the preview or undo the edit." } }
             }
@@ -202,6 +224,8 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
     // All admitted windows share one renderer, including uncancellable decoder work.
     private let renderer = AnnotationRenderer()
     private(set) var admissionMessage: String?
+    var exportCopy: ((AnnotationSource, AnnotationState, Bool) async throws -> URL)?
+    var onChange: (() -> Void)?
 
     @discardableResult func open(identity: AnnotationSessionIdentity, openRecents: @escaping () -> Void) -> Bool {
         admissionMessage = nil
@@ -221,6 +245,8 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
         }
         let model = AnnotationEditorModel(identity: identity, renderer: renderer)
         model.openRecents = openRecents
+        model.exportCopy = exportCopy
+        model.didSave = onChange
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 620),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Annotate — " + URL(fileURLWithPath: identity.reference.lastKnownPath).lastPathComponent
@@ -240,6 +266,15 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
         controller.showWindow(nil); window.makeKeyAndOrderFront(nil); model.load()
         return true
     }
+    func prepareToQuit() -> Bool {
+        for session in sessions.values {
+            if session.model.busy { session.controller.showWindow(nil); return false }
+            if let window = session.controller.window, !windowShouldClose(window) {
+                window.makeKeyAndOrderFront(nil); return false
+            }
+        }
+        return true
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let model = sessions.values.first(where: { $0.controller.window === sender })?.model,
               model.document?.isDirty == true else { return true }
@@ -249,8 +284,10 @@ final class AnnotationEditorCoordinator: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: "Keep Editing")
         alert.addButton(withTitle: "Discard Edits")
         alert.addButton(withTitle: "Save Copy…")
-        alert.buttons[2].isEnabled = false
-        return alert.runModal() == .alertSecondButtonReturn
+        alert.buttons[2].isEnabled = model.canSave
+        let result = alert.runModal()
+        if result == .alertThirdButtonReturn { model.save() }
+        return result == .alertSecondButtonReturn
     }
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
@@ -300,11 +337,11 @@ private struct AnnotationEditorView: View {
                         }
                     }.frame(width: 150).accessibilityLabel("Zoom")
                     Spacer()
-                    Button("Save Copy…", action: model.save).keyboardShortcut("s").disabled(true).help(AnnotationEditorModel.exportUnavailable)
-                    Button("Save & Copy", action: model.save).disabled(true).help(AnnotationEditorModel.exportUnavailable)
+                    Button("Save Copy", action: model.save).keyboardShortcut("s").disabled(!model.canSave)
+                    Button("Save & Copy") { model.save(copyToClipboard: true) }.disabled(!model.canSave)
                 }
-                Text("Original unchanged · Preview only").font(.caption).accessibilityLabel(model.document?.isDirty == true ? "Original unchanged. Preview only. Unsaved edits." : "Original unchanged. Preview only. No unsaved edits.")
-                Text(AnnotationEditorModel.exportUnavailable).font(.caption).foregroundStyle(.secondary)
+                Text("Original unchanged").font(.caption).accessibilityLabel(model.document?.isDirty == true ? "Original unchanged. Unsaved edits." : "Original unchanged. No unsaved edits.")
+                Text("Saves a new annotated PNG in your selected screenshot folder.").font(.caption).foregroundStyle(.secondary)
             }.padding(12)
         }
         .onExitCommand { gestureCancelled = dragStart != nil; dragStart = nil; dragEnd = nil; model.cancelGesture() }

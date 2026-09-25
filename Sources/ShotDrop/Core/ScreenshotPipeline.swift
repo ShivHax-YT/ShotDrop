@@ -15,6 +15,7 @@ struct ScreenshotPipelineOutcome: Sendable {
     let sourceURL: URL
     let save: ScreenshotSaveOutcome
     let copy: ScreenshotPipelineCopyOutcome
+    var observedAt: Date = Date()
 }
 
 enum ScreenshotPipelineFailure: Error { case accessExplanationRequired, busy, superseded }
@@ -58,7 +59,9 @@ final class ScreenshotPipeline {
     private let prepare: Prepare
     private let saveLane: ScreenshotPipelineSaveLane
     private let publisher: ScreenshotClipboardPublisher
+    private let deduplicationLimit: Int
     private let mode: CopyMode
+    private let modeProvider: (() -> CopyMode)?
     private let allowSurvivingOriginalFallback: Bool
     private let onOutcome: (ScreenshotPipelineOutcome) -> Void
     private var generation = UUID()
@@ -69,12 +72,13 @@ final class ScreenshotPipeline {
     private var queue: [Job] = []
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var accepted: Set<ScreenshotFileIdentity> = []
+    private var acceptedOrder: [ScreenshotFileIdentity] = []
     private var stopTask: Task<Void, Never>?
     private var startupTask: Task<Void, Error>?
     private var ingressTask: Task<Void, Never>?
     private var ingress: AsyncStream<DetectedScreenshot>.Continuation?
 
-    init(writer: any ScreenshotPasteboardWriting, mode: CopyMode,
+    init(writer: any ScreenshotPasteboardWriting, mode: CopyMode, modeProvider: (() -> CopyMode)? = nil, deduplicationLimit: Int = ScreenshotPipeline.maximumAcceptedPerSession,
          authorizeSource: @escaping @Sendable () async throws -> Void,
          startDetector: @escaping Start, stopDetector: @escaping @Sendable () async -> Void,
          registerOutput: @escaping @Sendable (UUID) async -> Void,
@@ -83,12 +87,13 @@ final class ScreenshotPipeline {
          prepare: @escaping Prepare = { try await ScreenshotClipboardPreparer().prepare($0) },
          allowSurvivingOriginalFallback: Bool = false,
          onOutcome: @escaping (ScreenshotPipelineOutcome) -> Void) {
+        self.deduplicationLimit = max(1, deduplicationLimit)
         self.authorizeSource = authorizeSource; self.startDetector = startDetector
         self.stopDetector = stopDetector; self.registerOutput = registerOutput
         self.request = request; self.prepare = prepare
         self.saveLane = ScreenshotPipelineSaveLane(save: save)
         self.publisher = ScreenshotClipboardPublisher(writer: writer)
-        self.mode = mode; self.allowSurvivingOriginalFallback = allowSurvivingOriginalFallback
+        self.mode = mode; self.modeProvider = modeProvider; self.allowSurvivingOriginalFallback = allowSurvivingOriginalFallback
         self.expectedClipboardCount = writer.changeCount; self.onOutcome = onOutcome
     }
 
@@ -98,7 +103,7 @@ final class ScreenshotPipeline {
             throw ScreenshotPipelineFailure.busy
         }
         generation = UUID(); let session = generation
-        accepted.removeAll(); rejectedSources.removeAll(); latestPublished = nil
+        accepted.removeAll(); acceptedOrder.removeAll(); rejectedSources.removeAll(); latestPublished = nil
         let drops = ScreenshotPipelineIngressDrops() // Overflow recovery belongs to this session only.
         expectedClipboardCount = publisher.changeCount; state = .starting
         // The lifecycle owns authorization and detector startup through actual completion.
@@ -151,7 +156,7 @@ final class ScreenshotPipeline {
         let waiting = queue; queue.removeAll()
         for job in waiting {
             onOutcome(.init(captureID: job.id, sessionID: job.generation, observationSequence: job.event.observationSequence,
-                sourceURL: job.event.url, save: .cancelled(originalURL: job.event.url), copy: .cancelled))
+                sourceURL: job.event.url, save: .cancelled(originalURL: job.event.url), copy: .cancelled, observedAt: job.event.observedAt))
         }
         let active = Array(tasks.values)
         for task in active { task.cancel() }
@@ -185,7 +190,7 @@ final class ScreenshotPipeline {
 
     private func admit(_ event: DetectedScreenshot, generation session: UUID) {
         guard state == .running, generation == session, !accepted.contains(event.identity) else { return }
-        guard queue.count < Self.maximumPending, accepted.count < Self.maximumAcceptedPerSession else {
+        guard queue.count < Self.maximumPending else {
             // Admission pressure remains visible and recoverable; never call it saved.
             rejectedSources.append(event.url)
             if rejectedSources.count > Self.maximumPending { rejectedSources.removeFirst() }
@@ -194,6 +199,8 @@ final class ScreenshotPipeline {
         if publisher.changeCount != expectedClipboardCount {
             manualEpoch = UUID(); expectedClipboardCount = publisher.changeCount
         }
+        if acceptedOrder.count == deduplicationLimit { accepted.remove(acceptedOrder.removeFirst()) }
+        acceptedOrder.append(event.identity)
         accepted.insert(event.identity)
         queue.append(Job(event: event, generation: session, manualEpoch: manualEpoch,
                          admittedDuringManualCopy: manualCopyPending))
@@ -223,16 +230,16 @@ final class ScreenshotPipeline {
             let clipboardRequest: ScreenshotClipboardRequest
             switch saved {
             case .saved(let result):
-                clipboardRequest = .init(sourceURL: result.destinationURL, mode: mode,
+                clipboardRequest = .init(sourceURL: result.destinationURL, mode: modeProvider?() ?? mode,
                     expectedIdentity: result.destinationIdentity, survivingFileURL: result.destinationURL,
                     survivingFileIdentity: result.destinationIdentity)
             case .failed where allowSurvivingOriginalFallback:
-                clipboardRequest = .init(sourceURL: job.event.url, mode: mode,
+                clipboardRequest = .init(sourceURL: job.event.url, mode: modeProvider?() ?? mode,
                     expectedIdentity: job.event.identity, survivingFileURL: job.event.url,
                     survivingFileIdentity: job.event.identity)
             default:
                 onOutcome(.init(captureID: job.id, sessionID: job.generation, observationSequence: job.event.observationSequence,
-                    sourceURL: job.event.url, save: saved, copy: .notAttempted("No verified saved file; original fallback was not selected.")))
+                    sourceURL: job.event.url, save: saved, copy: .notAttempted("No verified saved file; original fallback was not selected."), observedAt: job.event.observedAt))
                 return
             }
             let prepared = try await prepare(clipboardRequest)
@@ -246,7 +253,7 @@ final class ScreenshotPipeline {
         // Preserve a real save receipt even when a stopped session cannot copy.
         // Consumers use sessionID/captureID to avoid retargeting current UI/history.
         onOutcome(.init(captureID: job.id, sessionID: job.generation, observationSequence: job.event.observationSequence,
-                        sourceURL: job.event.url, save: saved, copy: copy))
+                        sourceURL: job.event.url, save: saved, copy: copy, observedAt: job.event.observedAt))
     }
 
     private func beforeSavePublication(_ job: Job, outputToken: UUID) async throws {

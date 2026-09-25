@@ -1,39 +1,31 @@
-# ShotDrop — Roadmap
+# ShotDrop roadmap
 
-The implementor ticks boxes as items land. Each milestone ends with a QA pass.
+## Local product implementation
+- [x] Menu bar app, library, settings, About, app icon, launch-at-login control
+- [x] Screenshot detection, bounded readiness and duplicate suppression
+- [x] Active ordered auto-copy/save pipeline after setup
+- [x] Image/file/both copying, including JPEG/HEIC-to-PNG clipboard conversion
+- [x] Source-preserving saves, names, collision handling and date folders
+- [x] Destination checks, failure status and Retry Saving
+- [x] Finishable onboarding with folder-access explanations
+- [x] Floating thumbnail and drag-out actions
+- [x] Recent 20 screenshots, copy/open/reveal, clear history and confirmed Trash
+- [x] On-device OCR
+- [x] Annotation tools, undo/redo, crop, Save Copy and Save & Copy
+- [x] Pinned windows, manager and reachable image viewport
+- [x] Capture menu and optional screen/selection/window hotkeys
+- [x] Pause/resume, display sleep/wake and graceful quit
+- [x] Distribution/notarization instructions
 
-## M0 — Scaffold
-- [x] XcodeGen project.yml, menu bar app shell (LSUIElement), app icon placeholder, launch-at-login (SMAppService)
-- [x] Settings window skeleton, unit test target, `make`-style build script in README
+## Verification and distribution
+- [x] Native setup advancement, ready library, generated-fixture processing,
+      OCR feedback, annotation export and pin management observed
+- [x] Automated core, regression and integration tests (see VALIDATION.md)
+- [ ] Native system-capture shortcuts and optional capture-permission flow
+- [ ] Sustained performance/memory measurements across large native captures
+- [ ] macOS 14 runtime, physical multi-display/Spaces and VoiceOver acceptance
+- [ ] Fresh-account TCC denial/recovery and actual launch-at-login reboot test
+- [ ] Developer ID signing, notarization and public-release acceptance
 
-M0 validation: Debug build and 9 unit tests pass; app process launched. GUI acceptance is pending QA because the computer-use surface timed out. Actual login-at-login behavior and stable-signing TCC persistence are not yet verified.
-## M1 — Core pipeline
-- [x] Detect new screenshots (FSEvents primary + optional NSMetadataQuery reconciliation), log latency
-- [x] Clipboard service with one-item Image / File / Both publication and private-board tests
-- [ ] Activate ordered auto-copy pipeline after source access and bounded staging acceptance
-- [x] Save verified copies to chosen folder with rename template and collision handling (originals retained)
-- [x] Source-preserving file operations + failure tests
-- [x] Destination separation, truthful save outcomes, and retry/recovery actions
-
-Detection validation: 51 tests pass, including a real filesystem watcher with synthetic PNG/xattr fixtures, late metadata, deduplication, and cancellation races. The detector service is not started by the app yet. Native system-capture timing and source-folder permission acceptance remain pending.
-
-Organization validation (#107 repair): production Debug build and 98 unhosted Core tests pass. Both stage pathname races fail deterministically on the #21 baseline and pass with descriptor-bound clone publication and cleanup. Coverage includes hardlink output substitution, metadata/byte verification, exclusive collisions, cancellation, post-publication recovery, UUID output suppression, and actual clone-call injection of ENOTSUP, EXDEV, ENOSPC, and EACCES. Review accepted the race repairs and QA passed 31 fresh focused tests against the frozen 38d35de candidate. The earlier retained per-capture staging design is superseded by #228 below. Separate physical-volume behavior and real folder-permission acceptance remain pending; automatic app processing and destination-failure UI are still pending.
-Clipboard validation (#121): all 117 unhosted Core tests pass, including 19 new preparation and private-board tests. Image/File/Both have exactly the intended types on one item; readback, validation, cancellation, setup/write failure, and source/path changes are covered. Image mode currently accepts PNG only, bounded to 64 MiB encoded data. Real consumer, after-quit, macOS 14 runtime, GUI/TCC, and automatic pipeline acceptance remain pending.
-Save recovery validation (#122): all 151 unhosted tests pass (34 new tests) and the recovery component compiles. Fixtures cover destination identity/ancestry, aliases, source-root mismatch, missing destinations, permission failures, clone errors, verification failure, collision races/exhaustion, direct retry, cancellation, and changed/unavailable originals. Native recovery presentation is ready for pipeline integration; actual keyboard/VoiceOver, GUI/TCC, and physical cross-volume behavior remain unverified.
-
-Bounded staging validation (#228): all 222 signed unhosted tests pass, including 10,000 successful synthetic transactions with two stable slot identities and no pool-entry growth. Fixed pools enforce one active transaction, four registered roots, two slots per root, bounded payload/metadata, persistent volume UUID identity, explicit destination review, and durable retirement on uncertainty. Disposable fixtures cover collision retry, cancellation/contention, interrupted states, reset/journal failures, source preservation, inherited destination ACLs, and exact provenance baseline reuse. The 257-byte workload completed in 97.53 seconds; save-operation mean/p95 were 9.30/17.54 ms, excluding fixture assertions and output removal. This is neither native screenshot latency nor a physical disk quota measurement. Admission is initially limited to reviewed ordinary local directories on writable internal APFS; missing/replaced selected roots pause until explicit re-review. Production enrollment remains unavailable and processing stays inactive. Independent Review #511 and QA #523/#524 accepted the exact 3304626 Core candidate. Setup, real TCC, physical remount/disconnect, macOS 14 runtime, and zero-configuration acceptance remain open.
-
-## M2 — UX
-- [ ] Floating thumbnail with drag-out, click-to-open, swipe-to-dismiss
-- [ ] Menu bar recent list (20) with copy/reveal/delete
-- [ ] Onboarding + permission explainer
-Setup implementation (#153): a single reversible first-run window and Finish Setup entries now separate destination choice, source confirmation, access checks, and gated test instructions. All 257 signed unhosted tests pass, including 36 setup model/access tests; the unchanged 10,000-transaction staging workload remains covered by #228 evidence and was omitted from this UI/setup suite. No processing or production destination issuer is enabled. Missing default destinations are not created; folder preflight is read-only and never a write-success claim. Native keyboard/VoiceOver, appearance, motion, TCC, and complete ready/test flow remain open, so onboarding acceptance stays unchecked.
-
-## M3 — Power features
-- [ ] OCR copy text (Vision)
-- [ ] Quick annotate window (arrow, rect, blur, text, crop)
-- [ ] Pin screenshot as floating window
-## M4 — Ship
-- [ ] Performance pass (idle CPU ~0%, memory)
-- [ ] App icon, About window, Sparkle updates (optional), notarization notes
-- [ ] QA release checklist green
+Implementation checkboxes describe shipped local code, not proof of every hardware
+or operating-system scenario. Remaining observations are explicit in VALIDATION.md.

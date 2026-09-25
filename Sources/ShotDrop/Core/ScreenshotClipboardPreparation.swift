@@ -1,3 +1,4 @@
+import CoreImage
 import Darwin
 import Foundation
 import ImageIO
@@ -106,6 +107,23 @@ struct ScreenshotClipboardPreparer: Sendable {
                 }
             }
             try verifyClipboardPath(request.sourceURL, descriptor: descriptor, expected: initial, failure: .sourceChanged)
+            if !data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) {
+                let decoded = try ScreenshotTextImage(data: data)
+                let upright = CIImage(cgImage: decoded.image).oriented(decoded.orientation)
+                let context = CIContext(options: [.cacheIntermediates: false])
+                guard let image = context.createCGImage(upright, from: upright.extent) else {
+                    throw ScreenshotClipboardFailure(.invalidImage, "Could not decode screenshot pixels.")
+                }
+                let output = NSMutableData()
+                guard let encoder = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else {
+                    throw ScreenshotClipboardFailure(.invalidImage, "Could not encode clipboard image.")
+                }
+                CGImageDestinationAddImage(encoder, image, nil)
+                guard CGImageDestinationFinalize(encoder), output.length <= maximumPNGBytes else {
+                    throw ScreenshotClipboardFailure(.imageTooLarge, "Clipboard image exceeds the size limit.")
+                }
+                data = output as Data
+            }
             try Self.validatePNG(data)
             try verifyClipboardPath(request.sourceURL, descriptor: descriptor, expected: initial, failure: .sourceChanged)
             pngData = data

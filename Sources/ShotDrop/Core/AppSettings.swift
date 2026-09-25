@@ -34,6 +34,13 @@ final class AppSettings {
 
     @ObservationIgnored private let defaults: UserDefaults
 
+    var sourcePath: String {
+        didSet { defaults.set(sourcePath, forKey: "sourcePath") }
+    }
+    var isPaused: Bool {
+        didSet { defaults.set(isPaused, forKey: "isPaused") }
+    }
+
     var destinationPath: String {
         didSet { defaults.set(destinationPath, forKey: Key.destinationPath) }
     }
@@ -90,6 +97,8 @@ final class AppSettings {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        sourcePath = defaults.string(forKey: "sourcePath") ?? ""
+        isPaused = defaults.bool(forKey: "isPaused")
         destinationPath = defaults.string(forKey: Key.destinationPath)
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Pictures/ShotDrop", isDirectory: true).path

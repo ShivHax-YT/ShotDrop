@@ -89,8 +89,8 @@ final class AnnotationExportTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.destination.path), ["recoverable.png"])
     }
 
-    func testProductionExportRemainsClosed() {
-        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+    func testProductionExportIsAvailable() {
+        XCTAssertTrue(AnnotationExportAvailability.productionEnabled)
         XCTAssertFalse(AnnotationExportAvailability.explanation.isEmpty)
     }
 

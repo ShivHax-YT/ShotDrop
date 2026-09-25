@@ -41,7 +41,8 @@ actor ScreenshotDetector {
         var errorDescription: String? { "Screenshot detection is already running or changing state." }
     }
 
-    private(set) var status: Status = .idle
+    private(set) var status: Status = .idle { didSet { onStatus?(status) } }
+    private let onStatus: (@Sendable (Status) -> Void)?
     private let fileSystem: any ScreenshotFileSystemReading
     private let watcher: any ScreenshotWatching
     private let checker: ScreenshotReadinessChecker
@@ -86,8 +87,10 @@ actor ScreenshotDetector {
         wallTimeNanoseconds: @escaping @Sendable () -> Int64 = {
             Int64(Date().timeIntervalSince1970 * 1_000_000_000)
         },
+        onStatus: (@Sendable (Status) -> Void)? = nil,
         onScreenshot: @escaping @Sendable (DetectedScreenshot) -> Void
     ) {
+        self.onStatus = onStatus
         self.fileSystem = fileSystem
         self.watcher = watcher
         checker = ScreenshotReadinessChecker(fileSystem: fileSystem, clock: clock, retryDelays: retryDelays)

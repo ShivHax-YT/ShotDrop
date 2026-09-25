@@ -1,7 +1,7 @@
 import Foundation
 
 enum AnnotationTool: String, CaseIterable, Identifiable, Sendable {
-    case select = "Select", arrow = "Arrow", rectangle = "Rectangle", blur = "Visual Blur", text = "Text", crop = "Crop"
+    case select = "Select", arrow = "Arrow", rectangle = "Rectangle", highlight = "Highlight", pixelate = "Pixelate", blur = "Visual Blur", text = "Text", crop = "Crop"
     var id: String { rawValue }
 }
 

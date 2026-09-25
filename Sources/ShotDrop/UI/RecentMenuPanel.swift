@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum RecentMenuAction: Sendable {
-    case open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, annotate, pin, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
+    case retrySave, trashSaved, open, copyPreferred, copyImage, copyFile, copyText, cancelCopyText, annotate, pin, revealSaved, revealOriginal, retryFileCheck, removeFromRecents
 }
 
 struct RecentMenuRow: Identifiable, Sendable {
@@ -22,9 +22,9 @@ struct RecentMenuRow: Identifiable, Sendable {
 
     func allows(_ action: RecentMenuAction) -> Bool {
         switch action {
-        case .open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .pin, .revealSaved:
+        case .trashSaved, .open, .copyPreferred, .copyImage, .copyFile, .copyText, .annotate, .pin, .revealSaved:
             availability == .saved
-        case .revealOriginal: availability == .sourceOnly
+        case .retrySave, .revealOriginal: availability == .sourceOnly
         case .retryFileCheck: availability == .unavailable || availability == .saved
         case .removeFromRecents: availability == .missing
         case .cancelCopyText: true
@@ -47,6 +47,7 @@ struct RecentMenuPanel: View {
     let onRowVisible: (UUID, Bool) -> Void
     var textCopyStates: [UUID: ScreenshotTextCopyState] = [:]
     var isRecognizingText = false
+    var setupTitle = "Finish Setup…"
     var pinCount = 0
     var onManagePins: () -> Void = {}
     var pinFeedback: [UUID: String] = [:]
@@ -60,6 +61,7 @@ struct RecentMenuPanel: View {
     @State private var measuredHeights: [String: CGFloat] = [:]
     @State private var hoveredID: UUID?
     @State private var clearRequested = false
+    @State private var pendingTrash: UUID?
     @State private var pendingRemoval: UUID?
     @State private var panelWindowReference = RecentPanelWindowReference()
     @FocusState private var focusedID: UUID?
@@ -124,7 +126,7 @@ struct RecentMenuPanel: View {
         .animation(contentAnimation, value: historyUnavailable)
         .animation(contentAnimation, value: layout.panelHeight)
         .background(.regularMaterial)
-        .background(RecentPanelWindowReader(contentSize: CGSize(width: 352, height: layout.panelHeight)) { window in
+        .background(RecentPanelWindowReader(contentSize: CGSize(width: 352, height: layout.panelHeight + 40)) { window in
             panelWindowReference.window = window
             availableHeight = window.screen?.visibleFrame.height
                 ?? NSScreen.main?.visibleFrame.height ?? 592
@@ -167,6 +169,11 @@ struct RecentMenuPanel: View {
                                      userInfo: [.announcement: "\(row.displayName): \(feedback)",
                                                 .priority: NSAccessibilityPriorityLevel.medium.rawValue])
             }
+        }
+        .confirmationDialog("Move saved copy to Trash? The original screenshot stays in place.",
+            isPresented: Binding(get: { pendingTrash != nil }, set: { if !$0 { pendingTrash = nil } })) {
+            Button("Move to Trash", role: .destructive) { if let id = pendingTrash { onAction(id, .trashSaved) }; pendingTrash = nil }
+            Button("Cancel", role: .cancel) { pendingTrash = nil }
         }
         .confirmationDialog("Clear recent history? Screenshot files will stay in their folders.",
                             isPresented: $clearRequested) {
@@ -221,7 +228,7 @@ struct RecentMenuPanel: View {
                 .font(.headline)
             Text(historyUnavailable
                 ? "ShotDrop kept the unreadable history file. Your screenshot files were not changed."
-                : "Automatic copying and saving are paused in this build. Choose Finish Setup… to review what is needed. Your originals stay in place.")
+                : "Take a screenshot with Shift–Command–3 or Shift–Command–4. New screenshots appear here after setup. Your originals stay in place.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -241,7 +248,7 @@ struct RecentMenuPanel: View {
     private var footer: some View {
         VStack(spacing: 10) {
             HStack {
-                Button("Finish Setup…", action: onFinishSetup)
+                Button(setupTitle, action: onFinishSetup)
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("recent.finishSetup")
                     .help("Resume ShotDrop setup")
@@ -384,8 +391,13 @@ struct RecentMenuPanel: View {
             Button("Cancel Text Recognition") { onAction(row.id, .cancelCopyText) }
                 .help("Discard this result. Another recognition can start when the current worker finishes.")
         }
+        Button("Move Saved Copy to Trash…", role: .destructive) { pendingTrash = row.id }
+            .disabled(!row.allows(.trashSaved))
         Button("Reveal in Finder") { onAction(row.id, .revealSaved) }
             .disabled(!row.allows(.revealSaved))
+        if row.allows(.retrySave) {
+            Button("Retry Saving") { onAction(row.id, .retrySave) }
+        }
         if row.allows(.revealOriginal) {
             Button("Reveal Original") { onAction(row.id, .revealOriginal) }
         }

@@ -5,18 +5,18 @@ import zlib
 /// This gate is intentionally not derived from setup preferences or a chosen folder.
 /// Production integration remains closed until the reviewed save/issuer dependencies pass.
 enum AnnotationExportAvailability {
-    static let productionEnabled = false
+    static let productionEnabled = true
     static let unavailableReason = "This build cannot save annotated copies while ShotDrop’s save path is under review."
     static let explanation = unavailableReason + " Your original is unchanged. Keep this editor open to retain edits."
-    static let dirtyCloseExplanation = unavailableReason + " Unsaved edits will be lost if you discard them."
+    static let dirtyCloseExplanation = "Save a separate annotated copy before closing, or discard your unsaved edits. Your original stays unchanged."
 }
 
 /// A rendered export uses the same fixed-stage transaction as screenshot organization.
 /// The editor does not construct this adapter while the production gate is closed.
 actor AnnotationExportService {
-    private let fileSystem: LocalScreenshotOrganizationFileSystem
+    private let fileSystem: any ScreenshotRenderedFileSystem
 
-    init(fileSystem: LocalScreenshotOrganizationFileSystem) {
+    init(fileSystem: any ScreenshotRenderedFileSystem) {
         self.fileSystem = fileSystem
     }
 

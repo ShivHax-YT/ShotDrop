@@ -103,3 +103,23 @@ TCC "Desktop folder" access prompt when reading ~/Desktop. No Screen Recording p
 
 ## References to research
 Apple docs: NSMetadataQuery, NSPasteboard, ScreenCaptureKit, Vision (VNRecognizeTextRequest).
+
+## 2026-09-25 production integration (supersedes dormant-path notes above)
+
+ShotDropRuntime owns the live ScreenshotPipeline, detector, history and thumbnail
+presentation. ProductionSetupAccess checks the selected folders; ProductionSetupGate
+starts the real pipeline before advancing to Verify. App reopening after completion
+shows the library. Destination changes return to setup, display sleep drains work,
+and wake/relaunch rechecks access. Quit protects dirty annotation sessions and drains
+file operations.
+
+DirectScreenshotFileSystem implements destination-local, exclusive temporary copying
+and atomic RENAME_EXCL publication. It reuses BoundedScreenshotCopy but never enrolls
+or mutates legacy staging registries. Source identity/size/timestamps, output bytes and
+metadata are checked. Publication never overwrites an existing destination. The same
+path handles rendered annotations after PNG validation. Crashed temporary files are
+kept instead of deleting potentially recoverable content on startup.
+
+History feeds recents, OCR and pin actions. Annotation export writes a fresh PNG,
+updates the shared history, and optionally copies the output. System capture commands
+use /usr/sbin/screencapture and optional Control-Option-3/4/5 Carbon hotkeys.

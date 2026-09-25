@@ -99,6 +99,14 @@ actor AnnotationRenderer {
             canvas.setLineWidth(mark.stroke); canvas.setLineCap(.round); canvas.setLineJoin(.round)
             switch mark.tool {
             case .rectangle: canvas.stroke(mark.bounds)
+            case .highlight:
+                canvas.setFillColor(CGColor(red: mark.color.red, green: mark.color.green, blue: mark.color.blue, alpha: 0.3))
+                canvas.fill(mark.bounds)
+            case .pixelate:
+                let ci = CIImage(cgImage: sourceImage).applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: max(8, mark.blurRadius)])
+                if let result = context.createCGImage(ci, from: document.extent) {
+                    canvas.clip(to: mark.bounds); canvas.draw(result, in: document.extent)
+                }
             case .arrow:
                 canvas.move(to: mark.start); canvas.addLine(to: mark.end); canvas.strokePath()
                 let angle = atan2(mark.end.y - mark.start.y, mark.end.x - mark.start.x)

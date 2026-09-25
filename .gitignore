@@ -9,3 +9,5 @@ Config/Local.xcconfig
 
 __pycache__/
 *.py[cod]
+
+/build-release/

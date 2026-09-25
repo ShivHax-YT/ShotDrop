@@ -230,13 +230,13 @@ struct ShotDropSetupView: View {
             .padding(16)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
             Label {
-                paragraph("Automatic copying and saving are paused in this build. You can prepare your folders now and return to setup from the ShotDrop menu.")
+                paragraph("Choose your save folder and confirm your screenshot folder. ShotDrop will then copy and save new screenshots automatically.")
             } icon: { Image(systemName: "pause.circle") }
             .accessibilityIdentifier("setup.welcomeAvailability")
         case .destination:
             paragraph(model.proposesSupportedDefault
                 ? "Use Pictures/ShotDrop or choose another folder for saved copies. The default folder is prepared only after you confirm your screenshot source and the checks pass."
-                : "Choose an existing folder for saved copies. Continue to check access; macOS may ask for permission. Automatic saving stays paused until setup is ready.")
+                : "Choose a folder for saved copies. ShotDrop can create Pictures/ShotDrop for you. Continue to check access; macOS may ask for permission.")
             if let destination = model.destinationURL {
                 path(destination, label: model.destinationStatusLabel)
             }
@@ -246,7 +246,7 @@ struct ShotDropSetupView: View {
                 .focused($keyboardFocus, equals: .destinationPicker)
                 .accessibilityFocused($accessibilityFocus, equals: .destinationPicker)
                 .accessibilityIdentifier("setup.chooseDestination")
-            paragraph("The folder picker opens only when you choose it. No new folder is created by this step.")
+            paragraph("The folder picker opens only when you choose it. Continue creates the default save folder if needed.")
                 .foregroundStyle(.secondary)
         case .source:
             if model.showsPausedSetup {

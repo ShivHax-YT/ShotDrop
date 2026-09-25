@@ -37,6 +37,21 @@ final class RecentHistoryStoreTests: XCTestCase {
         XCTAssertEqual(reopenedRows, rows)
     }
 
+    func testNewSessionCaptureSortsAheadOfOlderMaximumSequenceExport() async throws {
+        let (directory, url) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = RecentHistoryStore(fileURL: url)
+        let older = UUID(), newer = UUID()
+        _ = try await store.admit(captureID: older, pipelineSequence: .max,
+            detectionDate: Date(timeIntervalSince1970: 10), displayName: "export.png")
+        _ = try await store.admit(captureID: newer, pipelineSequence: 1,
+            detectionDate: Date(timeIntervalSince1970: 20), displayName: "new capture.png")
+        let snapshot = try await store.snapshot()
+        XCTAssertEqual(snapshot.records.map(\.captureID), [newer, older])
+        let reopened = try await RecentHistoryStore(fileURL: url).snapshot()
+        XCTAssertEqual(reopened.records.map(\.captureID), [newer, older])
+    }
+
     func testRevisionCASAndIndependentOutcomes() async throws {
         let (directory, url) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

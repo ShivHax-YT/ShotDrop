@@ -58,3 +58,10 @@ enum ScreenshotCopyRacePoint: Sendable, CaseIterable {
     case afterCloneBeforeOutputOpen
     case afterStageIdentityCheckBeforeCleanup
 }
+
+protocol ScreenshotRenderedFileSystem: ScreenshotOrganizationFileSystem {
+    func stageRenderedPNG(source: URL, destinationRoot: URL, expectedIdentity: ScreenshotFileIdentity,
+                          expectedSourceDigest: String, png: Data) throws -> any ScreenshotStagedCopy
+}
+extension LocalScreenshotOrganizationFileSystem: ScreenshotRenderedFileSystem {}
+extension DirectScreenshotFileSystem: ScreenshotRenderedFileSystem {}

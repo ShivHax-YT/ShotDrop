@@ -70,6 +70,16 @@ final class PinPanelPresentationTests: XCTestCase {
         await fulfillment(of: [presented], timeout: 3)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls.first?.1, .passiveLoad)
+        let panel = try XCTUnwrap(calls.first?.0)
+        let content = try XCTUnwrap(panel.contentView)
+        content.layoutSubtreeIfNeeded()
+        func findScroll(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            return view.subviews.compactMap { findScroll($0) }.first
+        }
+        let scroll = try XCTUnwrap(findScroll(content))
+        XCTAssertGreaterThanOrEqual(scroll.frame.height, 100, "Pin image viewport must not collapse behind its controls")
+        XCTAssertGreaterThan(scroll.documentView?.frame.height ?? 0, 0)
         XCTAssertFalse(try XCTUnwrap(calls.first?.0).isVisible)
     }
 

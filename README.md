@@ -1,80 +1,70 @@
 # ShotDrop
 
-Every screenshot is instantly copied AND saved exactly where you want it.
+Copy and save screenshots automatically, without removing the originals.
 
-ShotDrop is a Swift 6 menu bar app for macOS 14 and later. The current M0
-scaffold provides the app shell, settings skeleton, launch-at-login control,
-and hosted unit tests. A filesystem-first screenshot detection service is implemented
-and tested with synthetic images, but is not yet activated by the app. A source-preserving
-organization service provides verified copies, naming templates, date folders, and collision
-handling. Automatic clipboard copying, the complete app pipeline, history, and floating
-previews are not implemented yet. See
-[the roadmap](docs/ROADMAP.md) for remaining work.
+ShotDrop is a local Swift 6 menu bar app for macOS 14 and later, using SwiftUI,
+AppKit, ImageIO and Vision. There are no accounts, uploads or runtime dependencies.
 
-## Development
+## Use
 
-Install Xcode with the macOS SDK and Swift 6 support, select it with Xcode's
-Settings > Locations > Command Line Tools, and install
-[XcodeGen](https://github.com/yonaskolb/XcodeGen). Apple Silicon is the primary
-development platform. No third-party runtime dependencies are required.
+1. Open ShotDrop and choose a save folder (default: `~/Pictures/ShotDrop`).
+2. Confirm the folder used by macOS screenshots. Allow folder access if macOS asks.
+3. Continue to Verify, then Done. The app starts watching for new screenshots.
+4. Use the usual Shift–Command–3/4/5 shortcuts. Finalized screenshot files are
+   copied to your chosen folder and published to the clipboard.
 
-Run commands from the repository root:
+Existing files are excluded at startup. macOS's floating screenshot thumbnail can
+hold a capture for several seconds before making the file available to ShotDrop.
+Clipboard-only macOS captures do not create a source file and are not watched.
+
+Features:
+- Image, file, or combined clipboard contents; PNG, JPEG and HEIC image preparation.
+- Safe names using `{app}`, `{date}` and `{time}`, collision suffixes and optional
+  year/month folders. The original stays untouched, including on failure.
+- Floating preview, drag-out, recent 20 captures, copy/open/reveal, retry failed
+  saves, and confirmed Move Saved Copy to Trash.
+- On-device OCR, pinned windows (up to three), and annotation editors with arrow,
+  rectangle, highlight, pixelation, visual blur, text, crop, undo/redo and separate
+  Save Copy / Save & Copy export. Blur/pixelation are visual effects, not a secure
+  redaction guarantee.
+- Pause/resume, sleep/wake handling, optional sound and launch at login.
+- Capture menu with screen, selection and window commands. Optional global
+  Control–Option–3/4/5 shortcuts use the native system capture utility; macOS may
+  require Screen Recording access for these commands. System shortcuts remain usable.
+
+Opening the app after completed setup shows the library. Setup remains available
+from its menu for changing folders. Settings changes to the destination pause
+processing and reopen setup so the new folder is checked.
+
+## Storage and limits
+
+The production writer uses exclusive temporary files inside the chosen destination,
+verifies bounded bytes, preserves screenshot metadata, and atomically publishes
+without overwriting existing files. Temporary files are removed on handled failure.
+A crash can leave a hidden `.shotdrop-*.tmp` in the destination; these files are not
+replayed or automatically deleted. Legacy staging registries and files are preserved
+and are no longer prerequisites for production saving.
+
+Folder setup currently admits supported local APFS destinations. External/provider
+volume compatibility is not claimed. Encoded files are limited to 64 MiB; OCR and
+annotation decoding have additional pixel/memory bounds. `{app}` is sampled when a
+ready capture is processed; macOS does not provide its original foreground app.
+
+## Build and test
+
+Xcode 27/Swift 6 tooling and XcodeGen are used for development. The deployment target
+remains macOS 14. `project.yml` is the project source of truth.
 
 ```sh
-make generate  # Generate ShotDrop.xcodeproj from project.yml
-make build     # Generate and build the Debug app
-make test      # Generate and run hosted XCTest tests
-make run       # Build and open the menu bar app
-make clean     # Remove only this repository's build directory
+make generate
+make build
+make test
+make run
 ```
 
-`project.yml` is the source of truth; the generated `.xcodeproj` is ignored by
-Git. Run `make generate` after adding files or changing target settings. Build
-products and test results are under `build/`. The app is at
-`build/Build/Products/Debug/ShotDrop.app`.
+The local build is `build/Build/Products/Debug/ShotDrop.app`. Configure stable
+Apple Development signing in ignored `Config/Local.xcconfig`. Ad-hoc rebuilds may
+invalidate folder-access grants. No credentials belong in tracked files.
 
-The equivalent build command is:
-
-```sh
-xcodegen generate
-xcodebuild -project ShotDrop.xcodeproj -scheme ShotDrop -configuration Debug -derivedDataPath build build
-```
-
-ShotDrop uses `LSUIElement`, so it appears in the menu bar without a Dock icon.
-Use its menu to open settings or quit. M0 does not watch the Desktop or request
-Screen Recording access. Launch at login uses macOS `SMAppService`; registration
-may need approval in System Settings > General > Login Items. A stable app
-location and signing identity are recommended when checking login behavior.
-
-## Local signing
-
-The default configuration uses ad-hoc signing, allowing local builds without
-a configured development team. Ad-hoc rebuilds can invalidate macOS permission
-grants; do not use them to evaluate persistent file-access permissions.
-
-For stable development signing, add your Apple account to Xcode, create an Apple
-Development certificate, and create the gitignored `Config/Local.xcconfig`:
-
-```xcconfig
-DEVELOPMENT_TEAM = YOUR_TEAM_ID
-CODE_SIGN_STYLE = Automatic
-CODE_SIGN_IDENTITY = Apple Development
-```
-
-`Config/Base.xcconfig` includes that file when present. Keep team-specific signing
-details out of tracked files. Distribution signing and notarization are future
-work; these commands produce a local development build.
-
-## Checks
-
-After `make test`, launch the app and check that its menu opens, settings can be
-reopened, and Quit exits cleanly. Test login registration only when intentionally
-changing your Login Items, then restore the previous setting. Passing unit tests
-does not establish actual login behavior or future screenshot permission behavior.
-
-The original geometric placeholder icon is in `Resources/Assets.xcassets`.
-Regenerate it with `python3 Resources/generate_icon.py`; no network or image
-generation service is involved.
-
-Built by a MacFleet Codex team. Contributor coordination starts with
-[AGENTS.md](AGENTS.md) and [PROMPTS.md](PROMPTS.md).
+See [validation](docs/VALIDATION.md) for observed evidence and remaining platform
+checks, and [release notes](docs/RELEASE.md) for distribution steps.

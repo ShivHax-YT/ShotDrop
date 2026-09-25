@@ -19,10 +19,13 @@ struct ShotDropSetupReadiness: Sendable {
 }
 
 protocol ShotDropSetupReadinessGating: Sendable {
+    var permitsRetry: Bool { get }
     func evaluate(_ binding: ShotDropSetupReadinessBinding) async -> ShotDropSetupReadiness
 }
 
-/// Production deliberately has no issuer for the independently reviewed staging authorization.
+extension ShotDropSetupReadinessGating { var permitsRetry: Bool { false } }
+
+/// Legacy fixtures have no issuer for the independently reviewed staging authorization.
 struct ShotDropSetupUnavailableGate: ShotDropSetupReadinessGating {
     func evaluate(_ binding: ShotDropSetupReadinessBinding) async -> ShotDropSetupReadiness {
         ShotDropSetupReadiness(binding: binding, destinationReady: false,
@@ -304,7 +307,7 @@ final class ShotDropSetupModel {
         case .needsReview:
             destinationIssue = nil
             destinationNeedsReview = true
-            statusMessage = "Automatic copying and saving are not available in this build. Your save destination can be kept for later."
+            statusMessage = "Save folder checked. Confirm where macOS saves your screenshots."
             step = .source
             await discoverSource(token: token)
         case .unavailable(let issue):
@@ -380,8 +383,8 @@ final class ShotDropSetupModel {
         guard isCurrent(token) else { return }
         guard decision.permitsTest(for: binding) else {
             destinationNeedsReview = true
-            alternateReadinessPaused = true
-            statusMessage = pausedSetupMessage
+            alternateReadinessPaused = !gate.permitsRetry
+            statusMessage = gate.permitsRetry ? "Could not start screenshot processing. Check folder access and retry Continue, or choose another folder." : pausedSetupMessage
             return
         }
         verifiedBinding = binding

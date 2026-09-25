@@ -7,13 +7,13 @@ import XCTest
 
 @MainActor
 final class AnnotationEditorTests: XCTestCase {
-    func testDisabledSaveAndDirtyCloseExplainReviewedSavePath() {
+    func testUnconfiguredEditorExplainsUnavailableExportAndDirtyClose() {
         let reason = "This build cannot save annotated copies while ShotDrop’s save path is under review."
-        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+        XCTAssertTrue(AnnotationExportAvailability.productionEnabled)
         XCTAssertEqual(AnnotationEditorModel.exportUnavailable,
             reason + " Your original is unchanged. Keep this editor open to retain edits.")
         XCTAssertEqual(AnnotationExportAvailability.dirtyCloseExplanation,
-            reason + " Unsaved edits will be lost if you discard them.")
+            "Save a separate annotated copy before closing, or discard your unsaved edits. Your original stays unchanged.")
     }
 
     func testAxisAlignedArrowsAndUndoRedo() async throws {
@@ -67,7 +67,7 @@ final class AnnotationEditorTests: XCTestCase {
         await model.finishPendingWork()
         let state = model.document?.state
         model.save()
-        XCTAssertFalse(AnnotationExportAvailability.productionEnabled)
+        XCTAssertTrue(AnnotationExportAvailability.productionEnabled)
         XCTAssertEqual(model.message,AnnotationExportAvailability.explanation)
         XCTAssertTrue(try XCTUnwrap(model.document?.isDirty))
         XCTAssertEqual(model.document?.state,state)

@@ -7,13 +7,15 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
     let model: ShotDropSetupModel
     private let settings: AppSettings
     private var window: NSWindow?
+    private let onClose: () -> Void
     private var initialDestinationPath: String?
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, gate: any ShotDropSetupReadinessGating, onClose: @escaping () -> Void) {
         self.settings = settings
+        self.onClose = onClose
         model = ShotDropSetupModel(destinationURL: URL(fileURLWithPath: settings.destinationPath,
                                                       isDirectory: true),
-                                   defaultPreparer: LocalDefaultDestinationSetupPreparation())
+                                   service: ProductionSetupAccess(createDefaultIfMissing: true), gate: gate)
         super.init()
     }
 
@@ -56,6 +58,8 @@ final class ShotDropSetupWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         settings.recordSetupCompletion(ifTerminalSuccess:
             model.step == .test && !model.isPresented && !model.isDeferred)
+        if settings.hasCompletedSetup, let source = model.sourceURL { settings.sourcePath = source.path }
+        onClose()
         NSApplication.shared.setActivationPolicy(.accessory)
         // Closing the title-bar control is the same reversible deferral as Not Now.
         if model.isPresented {

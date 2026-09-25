@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 struct ShotDropSettingsView: View {
+    var runtime: ShotDropRuntime
     @Bindable var settings: AppSettings
     @Bindable var launchAtLogin: LaunchAtLoginController
     var onFinishSetup: () -> Void
@@ -13,8 +14,8 @@ struct ShotDropSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Label("Screenshot capture is not active yet", systemImage: "info.circle")
-                Text("You can set your preferences now. Automatic copying and saving will arrive in a future build.")
+                Label(runtime.status, systemImage: runtime.isRunning ? "checkmark.circle" : "info.circle")
+                Text("New system screenshots are saved as separate copies. Your originals stay in place.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Button("Finish Setup…", action: onFinishSetup)
