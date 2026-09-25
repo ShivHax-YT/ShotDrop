@@ -17,4 +17,4 @@ Local development builds are separate from a notarized public release.
   setup and pinned-window behavior in Spaces/fullscreen.
 
 Notarization and publication require the owner's distribution identity/profile.
-Nothing in this task uploads screenshots, publishes a release, or stores credentials.
+The GitHub v0.1.0 preview includes a universal macOS DMG (Apple Silicon and Intel; macOS 14+). It is Apple Development signed and is not notarized. Gatekeeper may block it on other Macs. Do not describe this preview as a notarized production release. Local signing settings, build outputs, and user screenshots are excluded from source control.

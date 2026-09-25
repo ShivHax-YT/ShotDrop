@@ -68,3 +68,7 @@ invalidate folder-access grants. No credentials belong in tracked files.
 
 See [validation](docs/VALIDATION.md) for observed evidence and remaining platform
 checks, and [release notes](docs/RELEASE.md) for distribution steps.
+
+## Download
+
+Download the DMG from [GitHub Releases](https://github.com/ShivHax-YT/ShotDrop/releases). The v0.1.0 preview supports macOS 14+ and contains Apple Silicon and Intel binaries. It is development signed, **not notarized**, and may be blocked by Gatekeeper on another Mac. See [release requirements](docs/RELEASE.md) and [validation coverage](docs/VALIDATION.md).
