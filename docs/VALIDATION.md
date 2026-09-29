@@ -113,3 +113,14 @@ The volume contained ShotDrop.app and the Applications shortcut and was detached
 DMG SHA-256: `e10f2db524385a5a8433dc30675bbf8bc2c42346afc33c990567247c84336eff`.
 This is an Apple Development signed preview, not a notarized production release.
 The hardware, OS, fresh-account, and distribution limits above still apply.
+
+A further live interaction pass on the same installed binary kept a thumbnail's
+context menu open beyond its normal idle interval. The preview remained visible;
+Copy Preview Image returned “Copied preview image at its displayed resolution.”
+Explicit dismissal removed the panel. Pause showed the paused state, and Resume
+returned the library to “Ready · New screenshots are copied and saved.” No source
+change was needed from this additional pass.
+
+Release v0.1.1 was published through Brave after GitHub Desktop pushed source
+commit `61c09a1`. GitHub's displayed DMG digest matched the verified local checksum.
+The release includes the universal DMG and SHA256SUMS.txt and is labeled Pre-release.
