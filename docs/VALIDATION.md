@@ -124,3 +124,47 @@ change was needed from this additional pass.
 Release v0.1.1 was published through Brave after GitHub Desktop pushed source
 commit `61c09a1`. GitHub's displayed DMG digest matched the verified local checksum.
 The release includes the universal DMG and SHA256SUMS.txt and is labeled Pre-release.
+
+## September 29 full audit after publication
+
+At source `2df2249` (release code `61c09a1`), the complete XCTest suite passed:
+516 tests, zero failures, including the 10,000-transaction stress workload.
+Tests took 127.080 seconds. Log: `/tmp/shotdrop-full-audit-20260929.log`;
+result bundle: `build/Logs/Test/Test-ShotDrop-2026.09.29_12-15-09--0700.xcresult`.
+Xcode reported 63.8% application executable-line coverage (8,631 of 13,533 lines).
+This is test coverage, not a percentage of correctness or an assurance of no bugs.
+The installed Apple Silicon app on macOS 27.0 (26A428) retained executable hash
+`0f35f91cdd6d2fff4342aa91b7353dfa6db09e3b224821003516c3b677b5e6a6`
+and passed strict/deep signature verification.
+
+A synthetic 1200 × 800 screenshot passed through the installed watcher, copying,
+saving, and history. Source and saved bytes matched SHA-256
+`9d28620ebcb80ac64aaa4ee0096fed6ddf9b998387e189e30eade3065b25aae3`.
+On-device OCR pasted exactly “SHOTDROP QA 2026” and
+“Copy save OCR annotate pin” into a fresh native TextEdit document; the local
+verification document was saved in `/tmp/ShotDrop-OCR-verification-20260929.rtf`.
+A browser clipboard read returned empty and was not used as product-failure
+or acceptance evidence; the native paste established actual clipboard behavior.
+
+Pin creation, manager Show, full image/controls, Fit, 100% scrollbars, and closure
+were observed, returning the pin count to zero. The annotation editor created
+rectangle, arrow, highlight, pixelate, visual blur, and text objects. A crop to
+1100 × 700 was applied, undone to 1200 × 800, and redone. Save & Copy produced a
+separate 1100 × 700 PNG with visible annotations, successful history outcomes,
+and SHA-256 `2ee4d64cfdf2b55652f3696c7643397942c1396a18999f2dc2a3f7ab01776ce7`.
+The original's hash remained unchanged. Export pixels were visually inspected.
+
+Graceful Quit removed the installed process. Relaunch returned to Ready with
+history and settings retained and no Finish Setup prompt. No application source
+change was required by these functional checks. Earlier process logs contained
+AppKit negative-view-geometry faults; those were not reproduced by the final
+fresh-process restart/settings check, so their root cause is not established.
+Expected malformed-image and write-failure diagnostics from negative tests were
+separated from installed-app observations. Apple Vision framework diagnostics
+also appeared despite successful OCR. Logs alone do not establish a user-visible
+failure, and the audit does not assert zero diagnostic messages.
+
+The limits listed above remain: fresh-account permissions, real reboot/login,
+macOS 14/Intel hardware, multi-display/Spaces/fullscreen, complete VoiceOver and
+keyboard workflows, long-duration native performance, and notarized distribution.
+Passing this audit does not prove that the entire app is bug-free.
