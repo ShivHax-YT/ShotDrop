@@ -63,3 +63,26 @@ The signed Release build passed strict/deep codesign verification, launched from
 `/Applications/ShotDrop.app`, and reopened into Ready with existing history in
 chronological order. The repaired pin was shown again: its image and all controls
 were visibly present. The verification pin was then closed, leaving the library ready.
+
+
+## September 29 setup and thumbnail follow-up
+
+The installed Settings window reproduced “Finish Setup…” alongside “Ready”.
+Settings now hides that onboarding action after recorded completion; Setup remains
+accessible from the library/menu. The repaired Release build was installed and
+visually verified with the button absent and all existing user preferences retained.
+Capture → Screen produced a new native PNG, the original remained in place, and
+the saved copy matched its bytes (SHA-256 comparison). History reported successful
+saving and copying, and the saved image opened in Preview.
+
+The thumbnail timeout is now seven idle seconds followed by a 250 ms opacity fade
+(120 ms with Reduce Motion). Hover, keyboard focus, menus, dragging, and in-progress
+actions retain the preview; leaving that interaction starts a fresh seven-second
+idle interval. Fade cleanup owns the departing panel so it cannot dismiss a new
+capture. Thumbnail open/copy/reveal actions are connected to verified saved-file
+actions, with manual clipboard intent protected from automatic capture publication.
+
+80 focused automated checks passed across preferences, setup, processing, history,
+thumbnail identity/OCR/policy, and file actions. Live timing, thumbnail actions, and
+clipboard-consumer checks for the final thumbnail build are pending Desktop 2
+confirmation. No public release asset has been changed by this follow-up.

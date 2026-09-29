@@ -6,7 +6,8 @@ enum ThumbnailPolicy {
     static let maximumSize = CGSize(width: 256, height: 166)
     static let edgeInset: CGFloat = 12
     static let dragThreshold: CGFloat = 7
-    static let idleSeconds: TimeInterval = 4
+    static let idleSeconds: TimeInterval = 7
+    static let fadeSeconds: TimeInterval = 0.25
 
     static func frame(in visibleFrame: CGRect) -> CGRect {
         let availableWidth = max(0, visibleFrame.width - edgeInset * 2)

@@ -17,8 +17,25 @@ final class ShotDropRuntime {
     private(set) var status = "Finish setup to start copying and saving"
     private let saves = ScreenshotSaveService(organizer: ScreenshotOrganizer(fileSystem: DirectScreenshotFileSystem()))
     @ObservationIgnored lazy var capture = ShotDropCaptureController(settings: settings, status: { [weak self] in self?.setStatus($0) })
+    @ObservationIgnored private lazy var thumbnailActions = PinScreenshotActions(
+        writer: AppKitScreenshotPasteboardWriter(pasteboard: .general), beginClipboardIntent: { [weak self] in
+            guard let self else { return { throw CancellationError() } }
+            let session = self.session
+            let clipboardCount = NSPasteboard.general.changeCount
+            return { [weak self] in
+                guard self?.session == session, NSPasteboard.general.changeCount == clipboardCount else {
+                    throw CancellationError()
+                }
+            }
+        })
     @ObservationIgnored private lazy var thumbnail = ShotDropThumbnailController(settings: settings,
-        textCopy: recents.textCopy, history: history, manualCopyIntent: { [weak self] in
+        action: { [weak self] snapshot, action in
+            guard let self else { return .init(status: "ShotDrop stopped.", fileActionsAvailable: false) }
+            let copying = action == .copyImage || action == .copyFile
+            if copying { self.recents.textCopy.cancel(); self.pipeline?.manualCopyWillBegin() }
+            defer { if copying { self.pipeline?.manualCopyDidFinish() } }
+            return await self.thumbnailActions.perform(snapshot, action: action)
+        }, textCopy: recents.textCopy, history: history, manualCopyIntent: { [weak self] in
             self?.pipeline?.manualCopyWillBegin()
             self?.pipeline?.manualCopyDidFinish()
         })

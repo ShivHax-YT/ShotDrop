@@ -21,7 +21,7 @@ Features:
 - Image, file, or combined clipboard contents; PNG, JPEG and HEIC image preparation.
 - Safe names using `{app}`, `{date}` and `{time}`, collision suffixes and optional
   year/month folders. The original stays untouched, including on failure.
-- Floating preview, drag-out, recent 20 captures, copy/open/reveal, retry failed
+- Floating preview with a seven-second idle timeout and smooth fade, drag-out, recent 20 captures, copy/open/reveal, retry failed
   saves, and confirmed Move Saved Copy to Trash.
 - On-device OCR, pinned windows (up to three), and annotation editors with arrow,
   rectangle, highlight, pixelation, visual blur, text, crop, undo/redo and separate

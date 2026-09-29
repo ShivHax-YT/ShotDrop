@@ -18,7 +18,9 @@ struct ShotDropSettingsView: View {
                 Text("New system screenshots are saved as separate copies. Your originals stay in place.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Button("Finish Setup…", action: onFinishSetup)
+                if !settings.hasCompletedSetup {
+                    Button("Finish Setup…", action: onFinishSetup)
+                }
             }
 
             Section("Saving") {

@@ -1,10 +1,13 @@
 import AppKit
+import OSLog
+import QuartzCore
 import SwiftUI
 
-/// Dormant, explicit presentation endpoint. No observer/pipeline installs this controller.
+/// Presents the verified saved screenshot after the runtime finishes processing it.
 /// One decode runs at a time; newer arrivals replace only the pending identity.
 @MainActor
 final class ShotDropThumbnailController {
+    private let logger = Logger(subsystem: "com.macfleet.shotdrop", category: "Thumbnail")
     typealias ActionDriver = @MainActor (PinScreenshotSnapshot, PinScreenshotAction) async -> PinScreenshotActionResult
     private struct Request {
         let identity: PinScreenshotIdentity
@@ -20,6 +23,7 @@ final class ShotDropThumbnailController {
     private var generation = UUID()
     private var visible: (UUID, PinScreenshotSnapshot)?
     private var panel: ThumbnailPanel?
+    private var fadingPanels: [ThumbnailPanel] = []
     private var idleTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
@@ -107,20 +111,44 @@ final class ShotDropThumbnailController {
         }
     }
 
-    func dismiss() {
+    func dismiss(animated: Bool = false) {
         generation = UUID()
         textSession?.bind(nil)
         idleTask?.cancel(); idleTask = nil
         actionTask?.cancel() // Keep the operation slot until its worker returns.
         if let token = visible?.0 { Task { [store] in await store.close(token) } }
         visible = nil
-        panel?.orderOut(nil); panel?.contentView = nil
+        if let panel {
+            self.panel = nil
+            if animated, panel.isVisible {
+                logger.info("Thumbnail fade started")
+                fadingPanels.append(panel)
+                // Fade a detached panel so a newer capture cannot be hidden by
+                // this animation's completion handler.
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                        ? 0.12 : ThumbnailPolicy.fadeSeconds
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    panel.animator().alphaValue = 0
+                } completionHandler: { [weak self] in
+                    Task { @MainActor in
+                        panel.orderOut(nil)
+                        panel.contentView = nil
+                        self?.fadingPanels.removeAll { $0 === panel }
+                        self?.logger.info("Thumbnail fade completed")
+                    }
+                }
+            } else {
+                panel.orderOut(nil); panel.contentView = nil
+            }
+        }
         isHovered = false; isFocused = false; isMenuOpen = false; isDragging = false
         startPending()
     }
 
     func stop() {
         stopped = true; pending = nil; dismiss()
+        finishFades()
         panel = nil
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
@@ -143,6 +171,7 @@ final class ShotDropThumbnailController {
                     height: snapshot.image.height, rgba: snapshot.image.rgba)) else { dismiss(); return }
         let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         idleTask?.cancel()
+        finishFades()
         isHovered = false; isFocused = false; isMenuOpen = false; isDragging = false
         let panel = self.panel ?? ThumbnailPanel(); self.panel = panel
         let identity = snapshot.identity
@@ -178,10 +207,13 @@ final class ShotDropThumbnailController {
                 self.isDragging = value; self.interactionChanged()
             },
             onSwipe: { [weak self] in self?.dismiss(identity: identity) })
-        panel.contentView = NSHostingView(rootView: card)
+        let host = NSHostingView(rootView: card)
+        host.setFrameSize(ThumbnailPolicy.maximumSize)
+        panel.contentView = host
         reposition()
         panel.alphaValue = 1
         panel.orderFront(nil)
+        logger.info("Thumbnail presented")
         feedback.status = nil
         updateIdle() // Deadline begins after the actual snapshot becomes visible.
     }
@@ -197,10 +229,14 @@ final class ShotDropThumbnailController {
         idleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(ThumbnailPolicy.idleSeconds))
             guard !Task.isCancelled, let self, self.visible?.1.identity == identity else { return }
-            self.dismiss()
+            self.dismiss(animated: true)
         }
     }
-    private func sleep() { isSleeping = true; pending = nil; dismiss() }
+    private func finishFades() {
+        for panel in fadingPanels { panel.orderOut(nil); panel.contentView = nil }
+        fadingPanels.removeAll()
+    }
+    private func sleep() { isSleeping = true; pending = nil; dismiss(); finishFades() }
     private func perform(_ action: PinScreenshotAction, snapshot: PinScreenshotSnapshot) {
         guard visible?.1.identity == snapshot.identity, actionTask == nil, let actionDriver else { return }
         let session = generation
