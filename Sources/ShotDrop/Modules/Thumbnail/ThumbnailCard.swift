@@ -1,9 +1,5 @@
 import AppKit
 import SwiftUI
-import Observation
-
-@MainActor @Observable
-final class ThumbnailFeedback { var status: String? }
 
 @MainActor
 struct ThumbnailCard: View {
@@ -31,7 +27,8 @@ struct ThumbnailCard: View {
     @State private var hovering = false
     @State private var swipeOffset: CGFloat = 0
 
-    private var available: Bool { actionsEnabled }
+    private var available: Bool { actionsEnabled && feedback.fileActionsAvailable }
+    private var hasKeyboardFocus: Bool { focused && feedback.isKeyWindow }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -47,7 +44,7 @@ struct ThumbnailCard: View {
                 .padding(8)
 
             ThumbnailDragSurface(capture: capture, image: image, validateDrag: validateDrag,
-                onOpen: onOpen, onDrag: onDrag,
+                onOpen: openOrRecover, onDrag: onDrag,
                 onMenu: onMenu,
                 onSwipeChange: { swipeOffset = $0 },
                 onSwipeEnd: { dismiss in
@@ -67,17 +64,17 @@ struct ThumbnailCard: View {
                     .allowsHitTesting(false)
             }
 
-            if hovering || focused {
+            if hovering || hasKeyboardFocus {
                 HStack(spacing: 2) {
                     Menu {
                         if available {
                             Button("Open Screenshot", action: onOpen)
-                            Button(copyImageTitle, action: onCopy)
                             Button("Copy File", action: onCopyFile)
                             Button("Reveal in Finder", action: onReveal)
                         } else {
                             Button("Open Recents", action: onOpenRecents)
                         }
+                        if actionsEnabled { Button(copyImageTitle, action: onCopy) }
                         if let textSession {
                             if textSession.isRunning {
                                 Button("Cancel Copy Text", action: textSession.cancel)
@@ -94,6 +91,7 @@ struct ThumbnailCard: View {
                     }
                     .menuStyle(.borderlessButton)
                     .help("Screenshot actions")
+                    .accessibilityLabel("Screenshot actions")
 
                     Button(action: onDismiss) {
                         Image(systemName: "xmark")
@@ -101,6 +99,7 @@ struct ThumbnailCard: View {
                     }
                     .buttonStyle(.borderless)
                     .help("Dismiss Thumbnail")
+                    .accessibilityLabel("Dismiss Thumbnail")
                 }
                 .padding(6)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -111,10 +110,15 @@ struct ThumbnailCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .focusable()
         .focused($focused)
+        .onKeyPress(keys: [.return, .space], phases: .down) { _ in
+            guard hasKeyboardFocus else { return .ignored }
+            openOrRecover()
+            return .handled
+        }
         .overlay {
-            if focused {
+            if hasKeyboardFocus {
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(.tint, lineWidth: 2)
+                    .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor), lineWidth: 2)
                     .allowsHitTesting(false)
             }
         }
@@ -123,11 +127,15 @@ struct ThumbnailCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Screenshot: \(capture.finalURL.lastPathComponent)")
         .accessibilityValue(fidelity.isEmpty ? "Saved screenshot snapshot" : fidelity)
-        .accessibilityAction(named: "Open Screenshot", onOpen)
-        .accessibilityAction(named: Text(copyImageTitle), onCopy)
-        .accessibilityAction(named: "Copy File", onCopyFile)
-        .accessibilityAction(named: "Reveal in Finder", onReveal)
         .accessibilityActions {
+            if available {
+                Button("Open Screenshot", action: onOpen)
+                Button("Copy File", action: onCopyFile)
+                Button("Reveal in Finder", action: onReveal)
+            } else {
+                Button("Open Recents", action: onOpenRecents)
+            }
+            if actionsEnabled { Button(copyImageTitle, action: onCopy) }
             if let textSession {
                 if textSession.isRunning {
                     Button("Cancel Copy Text", action: textSession.cancel)
@@ -141,18 +149,22 @@ struct ThumbnailCard: View {
         .accessibilityAction(named: "Dismiss Thumbnail", onDismiss)
     }
 
+    private func openOrRecover() {
+        if available { onOpen() } else { onOpenRecents() }
+    }
+
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let exists = available
         if exists {
             add("Open Screenshot", to: menu, action: onOpen)
-            add(copyImageTitle, to: menu, action: onCopy)
             add("Copy File", to: menu, action: onCopyFile)
             add("Reveal in Finder", to: menu, action: onReveal)
         } else {
             add("Open Recents", to: menu, action: onOpenRecents)
         }
+        if actionsEnabled { add(copyImageTitle, to: menu, action: onCopy) }
         if let textSession {
             if textSession.isRunning { add("Cancel Copy Text", to: menu, action: textSession.cancel) }
             else {

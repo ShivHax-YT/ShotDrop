@@ -16,5 +16,5 @@ Local development builds are separate from a notarized public release.
   on macOS 14 and the current macOS release. Check at least one multiple-display
   setup and pinned-window behavior in Spaces/fullscreen.
 
-Notarization and publication require the owner's distribution identity/profile.
-The GitHub v0.1.0 preview includes a universal macOS DMG (Apple Silicon and Intel; macOS 14+). It is Apple Development signed and is not notarized. Gatekeeper may block it on other Macs. Do not describe this preview as a notarized production release. Local signing settings, build outputs, and user screenshots are excluded from source control.
+A notarized production release requires the owner's distribution identity/profile.
+The 0.1.1 preview package includes a universal macOS DMG (Apple Silicon and Intel; macOS 14+). It is Apple Development signed and is not notarized. Gatekeeper may block it on other Macs. Do not describe this preview as a notarized production release. Local signing settings, build outputs, and user screenshots are excluded from source control.

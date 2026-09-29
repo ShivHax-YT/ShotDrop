@@ -65,24 +65,51 @@ chronological order. The repaired pin was shown again: its image and all control
 were visibly present. The verification pin was then closed, leaving the library ready.
 
 
-## September 29 setup and thumbnail follow-up
+## September 29 setup and thumbnail follow-up (0.1.1)
 
 The installed Settings window reproduced “Finish Setup…” alongside “Ready”.
 Settings now hides that onboarding action after recorded completion; Setup remains
-accessible from the library/menu. The repaired Release build was installed and
-visually verified with the button absent and all existing user preferences retained.
-Capture → Screen produced a new native PNG, the original remained in place, and
-the saved copy matched its bytes (SHA-256 comparison). History reported successful
-saving and copying, and the saved image opened in Preview.
+accessible from the library/menu. The final 0.1.1 (2) Release build was installed
+and visually verified with the button absent and all existing preferences retained.
 
-The thumbnail timeout is now seven idle seconds followed by a 250 ms opacity fade
-(120 ms with Reduce Motion). Hover, keyboard focus, menus, dragging, and in-progress
-actions retain the preview; leaving that interaction starts a fresh seven-second
-idle interval. Fade cleanup owns the departing panel so it cannot dismiss a new
-capture. Thumbnail open/copy/reveal actions are connected to verified saved-file
-actions, with manual clipboard intent protected from automatic capture publication.
+The thumbnail now waits seven idle seconds and fades over 250 ms (120 ms with
+Reduce Motion). Hover, keyboard focus, menus, dragging, and in-progress actions
+retain the preview; leaving interaction starts a fresh idle interval. Fade cleanup
+owns the departing panel so it cannot dismiss a newer capture. Native testing
+found that passive SwiftUI logical focus incorrectly retained the preview forever.
+Retention and the focus ring now require actual key-window ownership.
+
+On the final installed build, Capture → Screen produced a native screenshot at
+12:04:28 PDT. The original remained in place, history reported successful copy
+and save, and both files were 1,535,595 bytes with SHA-256
+`c3a9db73bb9ac82baab36de1a2b18f03c039a679b548c4ead12966267edc371b`.
+The floating preview was visibly present without a false focus ring. App logs
+recorded presentation at 12:04:29.487, fade start at 12:04:36.543, and completion at
+12:04:36.801: 7.056 seconds visible before a 258 ms fade. The next native inspection
+showed the library, with the thumbnail gone. Settings then showed copied/saved
+success and no Finish Setup prompt. Timing evidence comes from the native AppKit
+animation lifecycle, not a frame-by-frame recording.
+
+The preceding native pass verified that the thumbnail's Open Screenshot action
+opened the saved image in Preview. Preview's New from Clipboard produced the same
+full-resolution 2940 × 1912 image; the temporary verification document was saved
+locally and closed. Thumbnail file actions now offer Open Recents after a verified
+file becomes unavailable, while cached preview pixels remain copyable. Recovery
+is covered by a real missing-file regression test; Return/Space handling and
+semantic keyboard focus colors were added, but full keyboard/VoiceOver acceptance
+is not claimed.
 
 80 focused automated checks passed across preferences, setup, processing, history,
-thumbnail identity/OCR/policy, and file actions. Live timing, thumbnail actions, and
-clipboard-consumer checks for the final thumbnail build are pending Desktop 2
-confirmation. No public release asset has been changed by this follow-up.
+thumbnail identity/OCR/policy, and file actions after the focus fix. After the
+recovery/keyboard changes, the relevant 21 checks passed again; these overlap the
+80, rather than representing 101 distinct tests. The final universal Release build
+and strict/deep signature verification passed.
+
+The final DMG passed integrity verification and was mounted read-only without
+opening Finder. Its app reported 0.1.1, contained arm64 and x86_64 binaries, passed
+strict/deep signature verification, and matched the installed Release executable
+SHA-256 `0f35f91cdd6d2fff4342aa91b7353dfa6db09e3b224821003516c3b677b5e6a6`.
+The volume contained ShotDrop.app and the Applications shortcut and was detached.
+DMG SHA-256: `e10f2db524385a5a8433dc30675bbf8bc2c42346afc33c990567247c84336eff`.
+This is an Apple Development signed preview, not a notarized production release.
+The hardware, OS, fresh-account, and distribution limits above still apply.

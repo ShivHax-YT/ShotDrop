@@ -23,6 +23,7 @@ final class ShotDropAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.accessory)
         logger.info("ShotDrop started. Screenshot processing starts after folder setup.")
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        runtime.setOpenRecentsHandler { [weak self] in self?.showLibrary() }
         if settings.hasCompletedSetup { runtime.resume() }
         if settings.shouldPresentSetupOnLaunch {
             setupController.show()

@@ -56,6 +56,7 @@ final class ShotDropRuntime {
         }
     }
 
+    func setOpenRecentsHandler(_ action: @escaping () -> Void) { thumbnail.onOpenRecents = action }
     func setStatus(_ value: String) { status = value; recents.status = value }
     func togglePause() {
         settings.isPaused.toggle()

@@ -14,17 +14,25 @@ final class PinScreenshotActionsTests: XCTestCase {
         var externalCalls = 0
         let actions = PinScreenshotActions(writer: writer, beginClipboardIntent: { {} },
             open: { _ in externalCalls += 1; return true }, reveal: { _ in externalCalls += 1; return true })
+        let feedback = ThumbnailFeedback()
         for action in [PinScreenshotAction.open, .reveal, .copyFile] {
             let result = await actions.perform(fixture.snapshot, action: action)
             XCTAssertFalse(result.fileActionsAvailable)
+            feedback.apply(result, action: action)
+            XCTAssertFalse(feedback.fileActionsAvailable, "The thumbnail must offer recovery for unavailable files")
         }
         XCTAssertEqual(externalCalls, 0)
         XCTAssertEqual(writer.ownershipCount, 0)
         let copied = await actions.perform(fixture.snapshot, action: .copyImage)
+        feedback.apply(copied, action: .copyImage)
+        XCTAssertFalse(feedback.fileActionsAvailable, "Copying cached pixels must not restore broken file actions")
         XCTAssertTrue(copied.status.contains("Copied"))
         XCTAssertEqual(writer.ownershipCount, 1)
         try assertRedPNG(try XCTUnwrap(writer.png), width: fixture.snapshot.image.width, height: fixture.snapshot.image.height)
         XCTAssertNil(writer.fileURL)
+        feedback.beginPresentation(isKeyWindow: false)
+        XCTAssertTrue(feedback.fileActionsAvailable, "A newly verified capture starts with its own available file")
+        XCTAssertNil(feedback.status, "Recovery feedback must not leak into the next capture")
     }
 
     func testReplacementDoesNotRetargetFileActionsOrPinnedPixels() async throws {

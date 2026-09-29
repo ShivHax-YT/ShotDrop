@@ -34,7 +34,9 @@ final class ShotDropThumbnailController {
     private var isSleeping = false
     private var stopped = false
     private var screen: NSScreen?
-    private var locked: Bool { isFocused || isMenuOpen || isDragging || actionTask != nil || textSession?.isRunning == true }
+    private var locked: Bool {
+        (isFocused && feedback.isKeyWindow) || isMenuOpen || isDragging || actionTask != nil || textSession?.isRunning == true
+    }
     var onOpenRecents: (() -> Void)?
     private let dragValidation = ThumbnailDragValidation()
     private let feedback = ThumbnailFeedback()
@@ -175,6 +177,14 @@ final class ShotDropThumbnailController {
         isHovered = false; isFocused = false; isMenuOpen = false; isDragging = false
         let panel = self.panel ?? ThumbnailPanel(); self.panel = panel
         let identity = snapshot.identity
+        // SwiftUI may assign logical focus in a passive, non-key panel. Only
+        // actual keyboard ownership should retain the preview or draw its ring.
+        feedback.beginPresentation(isKeyWindow: panel.isKeyWindow)
+        panel.onKeyChange = { [weak self] isKey in
+            guard let self, self.visible?.1.identity == identity else { return }
+            self.feedback.isKeyWindow = isKey
+            self.interactionChanged()
+        }
         textSession?.bind(identity)
         let capture = ThumbnailCapture(id: identity.captureID,
             finalURL: URL(fileURLWithPath: identity.reference.lastKnownPath), copyFailed: copyFailed)
@@ -247,7 +257,7 @@ final class ShotDropThumbnailController {
             guard let self else { return }
             self.actionTask = nil
             if self.generation == session, self.visible?.1.identity == snapshot.identity {
-                self.feedback.status = result.status
+                self.feedback.apply(result, action: action)
                 self.panel?.contentView?.setAccessibilityHelp(result.status)
             }
             self.interactionChanged()
@@ -267,6 +277,7 @@ final class ShotDropThumbnailController {
 
 private final class ThumbnailPanel: NSPanel {
     var onEscape: (() -> Void)?
+    var onKeyChange: ((Bool) -> Void)?
     init() {
         super.init(contentRect: CGRect(origin: .zero, size: ThumbnailPolicy.maximumSize),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -274,6 +285,9 @@ private final class ThumbnailPanel: NSPanel {
         backgroundColor = .clear; hasShadow = true; becomesKeyOnlyIfNeeded = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
+    override var canBecomeKey: Bool { true }
+    override func becomeKey() { super.becomeKey(); onKeyChange?(true) }
+    override func resignKey() { super.resignKey(); onKeyChange?(false) }
     override func cancelOperation(_ sender: Any?) { guard isKeyWindow else { return }; onEscape?() }
 }
 
